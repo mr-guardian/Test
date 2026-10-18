@@ -140,24 +140,16 @@ def check_page_count(page_info: dict, key: str) -> int:
             LAST_ERRORS[key] = err_msg
             return -1
 
-        html_lower = resp.text.lower()
-
-        # Cloudflare veya Bot Koruma Sayfası Tespiti
-        if "just a moment" in html_lower or "cloudflare" in html_lower or "challenge-platform" in html_lower:
-            err_msg = "Cloudflare / Bot Koruması Engeli"
-            LAST_ERRORS[key] = err_msg
-            return -1
-
-        # Eksik veya boş yanıt tespiti
-        if len(resp.text) < 1200 and "video" not in html_lower:
-            err_msg = "Eksik / Boş Yanıt Döndü"
-            LAST_ERRORS[key] = err_msg
-            return -1
-
-        if key in LAST_ERRORS:
-            del LAST_ERRORS[key]
-
         soup = BeautifulSoup(resp.text, "html.parser")
+        title_text = soup.title.string.strip().lower() if (soup.title and soup.title.string) else ""
+
+        # Sadece gerçek Cloudflare engelleme ekranı varsa hata ver (Sayfa başlığı kontrolü)
+        if "just a moment" in title_text or "attention required" in title_text or "security check" in title_text:
+            err_msg = "Cloudflare Doğrulama Ekranı (JS Challenge)"
+            LAST_ERRORS[key] = err_msg
+            return -1
+
+        html_lower = resp.text.lower()
         text = soup.get_text()
 
         # 1. TIKVIB REPOSTLARI
@@ -165,55 +157,78 @@ def check_page_count(page_info: dict, key: str) -> int:
             # Ana video kartları
             items = soup.select(".posts__video-item, div.posts-video > div, a.posts__video-item-a")
             if items:
+                if key in LAST_ERRORS:
+                    del LAST_ERRORS[key]
                 return len(items)
             
             # /media/ veya /video/ linkleri
             media_links = soup.select("a[href*='/media/'], a[href*='/video/']")
             if media_links:
+                if key in LAST_ERRORS:
+                    del LAST_ERRORS[key]
                 return len(media_links)
             
             # Kazanç rozetleri
             earnings = soup.select(".posts__video-item-earnings, .earnings-toggle")
             if earnings:
+                if key in LAST_ERRORS:
+                    del LAST_ERRORS[key]
                 return len(earnings)
 
             # Regex araması
             matches = re.findall(r'/media/\d+', resp.text)
             if matches:
+                if key in LAST_ERRORS:
+                    del LAST_ERRORS[key]
                 return len(set(matches))
 
             # Açıkça "repost yok" ibaresi var mı?
             if "no reposts" in html_lower or "user has no reposts" in html_lower or "no videos" in html_lower:
+                if key in LAST_ERRORS:
+                    del LAST_ERRORS[key]
                 return 0
 
-            # Sayfa yüklendi ama seçiciler eşleşmedi (JS yükleme veya DOM değişimi)
-            LAST_ERRORS[key] = "İçerik ayrıştırılamadı (Boş liste döndü)"
+            # Sayfa boş veya ayrıştırılamadıysa
+            LAST_ERRORS[key] = "İçerik listesi okunamadı"
             return -1
 
         # 2. TIKVIB HİKAYELERİ (Sadece hikaye alanını inceler, alttaki repostları saymaz)
         elif p_type == "tikvib_story":
             if "user has no stories" in text.lower() or "no stories" in text.lower():
+                if key in LAST_ERRORS:
+                    del LAST_ERRORS[key]
                 return 0
             
             # Doğrudan hikaye oynatıcı veya indirme butonları
-            story_items = soup.select("a[download], button[download], .story-item, .story-wrapper video, .story-wrapper img")
+            story_items = soup.select("a[download], button[download], .story-item, .story-wrapper video, .story-wrapper img, .stories-list > *")
             if story_items:
+                if key in LAST_ERRORS:
+                    del LAST_ERRORS[key]
                 return len(story_items)
             
             # Sayfa içinde story player veya download linki geçiyorsa 1 hikaye vardır
             if "download" in html_lower or bool(soup.find_all("video")) or "data-story" in html_lower:
+                if key in LAST_ERRORS:
+                    del LAST_ERRORS[key]
                 return 1
 
+            if key in LAST_ERRORS:
+                del LAST_ERRORS[key]
             return 0
 
         # 3. THREADLOOK THREADS
         elif p_type == "threads":
             matches = re.findall(r'THREADS\s*(\d+)', text, re.IGNORECASE)
             if matches:
+                if key in LAST_ERRORS:
+                    del LAST_ERRORS[key]
                 return int(matches[0])
             matches_alt = re.findall(r'(\d+)\s*threads', text, re.IGNORECASE)
             if matches_alt:
+                if key in LAST_ERRORS:
+                    del LAST_ERRORS[key]
                 return int(matches_alt[0])
+            
             LAST_ERRORS[key] = "Thread sayısı ayrıştırılamadı"
             return -1
 
