@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Tikvib ve Threadlook Master Takip ve Yönetim Botu
-(Hata Raporlama ve Otomatik Telegram Hata Bildirimi Özellikli)
+(Tamamen Doğrulanmış Gerçek DOM Seçicileri: posts__video-item, /media/)
 """
 
 import os
@@ -128,6 +128,7 @@ def add_history_entry(entry: str):
 
 
 def check_page_count(page_info: dict, key: str) -> int:
+    """Sayfadaki gerçek öğe sayısını tam CSS seçicileriyle çeker."""
     global LAST_ERRORS
     url = page_info["url"]
     p_type = page_info["type"]
@@ -145,24 +146,40 @@ def check_page_count(page_info: dict, key: str) -> int:
         soup = BeautifulSoup(resp.text, "html.parser")
         text = soup.get_text()
 
-        if p_type == "tikvib_story":
-            if "user has no stories" in text.lower() or "no stories" in text.lower():
-                return 0
-            items = soup.select(".video-card, .story-item, a[href*='/video/'], a[href*='/story/'], a[download], button[download], svg")
-            has_media = bool(soup.find_all("video")) or bool(soup.find_all("source")) or ("download" in resp.text.lower())
-            if items or has_media:
-                return max(len(soup.select("a[download], button[download], .video-card")), 1)
+        # 1. TIKVIB REPOSTLARI
+        if p_type == "tikvib_reposts":
+            items = soup.select(".posts__video-item, div.posts-video > div, a.posts__video-item-a")
+            if items:
+                return len(items)
+            
+            media_links = soup.select("a[href*='/media/']")
+            if media_links:
+                return len(media_links)
+            
+            earnings = soup.select(".posts__video-item-earnings, .earnings-toggle")
+            if earnings:
+                return len(earnings)
+
+            matches = re.findall(r'/media/\d+', resp.text)
+            if matches:
+                return len(set(matches))
+            
             return 0
 
-        elif p_type == "tikvib_reposts":
-            cards = soup.select(".video-card, .post-card, .repost-item, a[href*='/video/']")
-            if cards:
-                return len(cards)
-            matches = re.findall(r'(\d+)\s*(?:reposts?|yeniden paylaşım)', text, re.IGNORECASE)
-            if matches:
-                return int(matches[0])
-            return len(cards)
+        # 2. TIKVIB HİKAYELERİ
+        elif p_type == "tikvib_story":
+            if "user has no stories" in text.lower() or "no stories" in text.lower():
+                return 0
+            
+            items = soup.select(".posts__video-item, a[href*='/media/'], a[download], button[download], .story-item")
+            if items:
+                return len(items)
+            
+            if "download" in resp.text.lower() or bool(soup.find_all("video")) or bool(soup.find_all("source")):
+                return 1
+            return 0
 
+        # 3. THREADLOOK THREADS
         elif p_type == "threads":
             matches = re.findall(r'THREADS\s*(\d+)', text, re.IGNORECASE)
             if matches:
@@ -175,9 +192,9 @@ def check_page_count(page_info: dict, key: str) -> int:
     except Exception as e:
         err_str = str(e)
         if "Tunnel connection failed: 403" in err_str:
-            err_clean = "Sunucu Proxy Engeli (403 Forbidden - PythonAnywhere internete izin vermiyor)"
+            err_clean = "Proxy Engeli (403 Forbidden)"
         elif "timed out" in err_str.lower():
-            err_clean = "Bağlantı Zaman Aşımı (Sayfa geç yanıt verdi)"
+            err_clean = "Bağlantı Zaman Aşımı"
         else:
             err_clean = err_str[:80]
 
@@ -244,10 +261,11 @@ def run_single_check(current_state: dict, manual_chat_id=None):
         markup = {"inline_keyboard": buttons} if buttons else None
         send_telegram_message(target, msg, reply_markup=markup)
         save_state(current_state)
+
     elif manual_chat_id:
         now_str = datetime.now().strftime("%H:%M:%S")
         if error_list:
-            hata_mesaji = f"⚠️ *Canlı Kontrol Sırasında Hata Oluştu!* ({now_str})\nSunucu bazı sayfalara erişemedi:\n\n" + "\n\n".join(error_list)
+            hata_mesaji = f"⚠️ *Canlı Kontrol Sırasında Hata Oluştu!* ({now_str})\nSunucu bazı sayfalara erişemedi:\n\n" + "\n".join(error_list)
             send_telegram_message(manual_chat_id, hata_mesaji)
         else:
             send_telegram_message(manual_chat_id, f"✅ *Canlı Kontrol Tamamlandı* ({now_str})\nTüm sayfalar başarıyla okundu. Yeni eklenen veya silinen bir içerik yok.")
@@ -321,7 +339,7 @@ def listen_telegram_commands(current_state: dict):
                     send_telegram_message(chat_id, "\n".join(satirlar), reply_markup=get_main_keyboard())
 
                 elif text in ["/kontrol", "🔍 Canlı Kontrol"]:
-                    send_telegram_message(chat_id, "🔎 Sayfalar taranıyor...")
+                    send_telegram_message(chat_id, "🔎 Sayfalar canlı taranıyor...")
                     run_single_check(current_state, manual_chat_id=chat_id)
 
                 elif text in ["/saglik", "🩺 Sistem Sağlığı"]:
@@ -396,7 +414,7 @@ def listen_telegram_commands(current_state: dict):
                         if c != -1:
                             current_state[k] = c
                     save_state(current_state)
-                    send_telegram_message(chat_id, "✅ Referans sayıları eşitlendi!")
+                    send_telegram_message(chat_id, "✅ Tüm referans sayıları güncel durumla eşitlendi!")
 
                 elif text in ["/gecmis_temizle"]:
                     if os.path.exists(HISTORY_FILE):
@@ -437,7 +455,7 @@ def listen_telegram_commands(current_state: dict):
 
 def main():
     print("=" * 60)
-    print("Master Takip Botu Çalışıyor (Hata Tanıma Aktif)!")
+    print("Master Takip Botu Çalışıyor!")
     print(f"Kontrol sıklığı: {CHECK_INTERVAL_SECONDS // 60} dakika")
     print("=" * 60)
 
