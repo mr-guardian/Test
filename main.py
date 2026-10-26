@@ -25,7 +25,7 @@ TELEGRAM_CHAT_ID = "6009524525"
 CHECK_INTERVAL_SECONDS = 900  # 15 dakikada bir kontrol
 STATE_FILE = "tracker_state.json"
 
-# Tüm profilleri Viewoo ve Threadlook üzerinden güncelledik
+# Her profil ve içerik türü için doğru ve test edilmiş adresler
 PAGES = {
     "sillagunerrr_story": {
         "url": "https://viewoo.co/u/sillagunerrr",
@@ -33,9 +33,9 @@ PAGES = {
         "type": "story",
     },
     "sillagunerrr_reposts": {
-        "url": "https://viewoo.co/u/sillagunerrr",
+        "url": "https://tik.watch/tr/@sillagunerrr?tab=reposts",
         "name": "sillagunerrr Repostlar",
-        "type": "viewoo_reposts",
+        "type": "tikwatch_reposts",
     },
     "userr44559014_reposts": {
         "url": "https://viewoo.co/u/userr44559014",
@@ -94,7 +94,7 @@ def check_page_count(page_info):
     text = soup.get_text()
     text_lower = text.lower()
 
-    # 1. Viewoo Sayfasındaki Repostlar
+    # 1. Viewoo üzerinden Repostlar (userr44559014 için)
     if p_type == "viewoo_reposts":
       repost_items = soup.select(
           ".repost-item, [data-repost], .post-card, .video-item, div[class*='repost']"
@@ -102,20 +102,41 @@ def check_page_count(page_info):
       if repost_items:
         return len(repost_items)
 
-      tiktok_ids = set(re.findall(r"\b7[0-6]\d{17}\b", html_text))
-      if tiktok_ids:
-        return len(tiktok_ids)
-
-      # Sayfa içerisindeki ilk mantıklı post/video elemanlarını sayalım
       posts = soup.select(
           "a[href*='/video/'], a[href*='/post/'], div.grid > div"
       )
       if posts:
         return len(posts)
-
       return 0
 
-    # 2. Hikaye Sayımı
+    # 2. Tik.watch üzerinden Repostlar (sillagunerrr için)
+    elif p_type == "tikwatch_reposts":
+      tiktok_video_ids = set(re.findall(r"\b7[0-6]\d{17}\b", html_text))
+      if len(tiktok_video_ids) > 1:
+        return len(tiktok_video_ids)
+
+      unique_media = set(
+          a.get("href")
+          for a in soup.select(
+              "a[href*='/media/'], a[href*='/video/'], a[href*='/post/']"
+          )
+          if a.get("href")
+          and not any(
+              x in a.get("href", "").lower()
+              for x in ("viewer", "profile", "comment")
+          )
+      )
+      if unique_media:
+        return len(unique_media)
+
+      cards = soup.select(
+          "div.posts__video-item, [data-video-id], .video-card, .repost-item"
+      )
+      if cards:
+        return len(cards)
+      return 0
+
+    # 3. Hikaye Sayımı
     elif p_type == "story":
       empty_phrases = (
           "user has no stories",
@@ -142,7 +163,7 @@ def check_page_count(page_info):
         return 1
       return 0
 
-    # 3. Threads Sayımı
+    # 4. Threads Sayımı
     elif p_type == "threads":
       matches = re.findall(r"THREADS\s*(\d+)", text, re.IGNORECASE)
       if matches:
