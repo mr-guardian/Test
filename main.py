@@ -94,7 +94,7 @@ def send_telegram_message(text, reply_markup=None):
   if reply_markup:
     payload["reply_markup"] = reply_markup
   try:
-    requests.post(url, json=payload, timeout=15)
+    requests.post(url, json=payload, timeout=10)
   except Exception as e:
     print(f"[!] Gönderim hatası: {e}")
 
@@ -102,8 +102,8 @@ def send_telegram_message(text, reply_markup=None):
 def fetch_url(url):
   try:
     if IS_CLOUDSCRAPER:
-      return HTTP_CLIENT.get(url, timeout=25)
-    return requests.get(url, headers=HEADERS, timeout=25)
+      return HTTP_CLIENT.get(url, timeout=15)
+    return requests.get(url, headers=HEADERS, timeout=15)
   except Exception:
     return None
 
@@ -222,12 +222,22 @@ def run_check():
 def listen_telegram():
   global CHECK_INTERVAL_SECONDS, IS_TRACKING_PAUSED, SILENT_MODE
   last_update_id = 0
-  print("[*] Telegram özelleştirilmiş komut dinleyici aktif.")
+  print("[*] Telegram komut dinleyici aktif ve optimize edildi.")
+
   while True:
     try:
       url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-      r = requests.get(url, params={"offset": last_update_id + 1, "timeout": 20})
+      # Eski birikmiş güncellemeleri atlamak ve timeout'u düşürmek için
+      r = requests.get(
+          url,
+          params={"offset": last_update_id + 1, "timeout": 10, "limit": 10},
+          timeout=15,
+      )
       resp = r.json()
+
+      if not resp.get("ok"):
+        time.sleep(3)
+        continue
 
       for item in resp.get("result", []):
         last_update_id = item["update_id"]
@@ -235,13 +245,15 @@ def listen_telegram():
         text = msg.get("text", "").strip()
         chat_id = str(msg.get("chat", {}).get("id", ""))
 
-        if chat_id != TELEGRAM_CHAT_ID:
+        if not chat_id or chat_id != TELEGRAM_CHAT_ID:
           continue
+
+        print(f"[KOMUT ALINDI]: {text}")
 
         if text in ["/start", "/yardim"]:
           send_telegram_message(
-              "👋 Hoş geldin! Aşağıdaki butonları kullanarak botu"
-              " yönetebilirsin.",
+              "👋 Bot aktif! Aşağıdaki butonları kullanarak işlem"
+              " yapabilirsin.",
               reply_markup=get_main_keyboard(),
           )
 
@@ -294,27 +306,15 @@ def listen_telegram():
               f"🔕 Sessiz mod: *{durum}*", reply_markup=get_main_keyboard()
           )
 
-        elif text.startswith("/sure"):
-          parts = text.split()
-          if len(parts) == 2 and parts[1].isdigit():
-            mins = int(parts[1])
-            CHECK_INTERVAL_SECONDS = mins * 60
-            send_telegram_message(
-                f"⏱ Kontrol sıklığı *{mins} dakika* yapıldı.",
-                reply_markup=get_main_keyboard(),
-            )
-          else:
-            send_telegram_message(
-                "⚠️ Kullanım: `/sure 10`", reply_markup=get_main_keyboard()
-            )
+    except Exception as e:
+      print(f"[!] Telegram dinleme hatası: {e}")
+      time.sleep(3)
 
-    except Exception:
-      time.sleep(5)
     time.sleep(1)
 
 
 def main():
-  print("Master Takip Botu Özelleştirilmiş Sürüm Başlatıldı...")
+  print("Master Takip Botu Başlatıldı...")
   t = threading.Thread(target=listen_telegram, daemon=True)
   t.start()
 
