@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Tikvib, Viewoo ve Threadlook Master Takip ve Yönetim Botu
+Tikvib, Viewoo, Tik.watch ve Threadlook Master Takip ve Yönetim Botu
 (Tekilleştirilmiş Benzersiz Seçiciler, Cloudscraper/Oturum Desteği, iOS Kestirme / Tek Seferlik Mod)
 """
 
@@ -48,7 +48,7 @@ DEFAULT_PAGES = {
         "type": "tikvib_story"
     },
     "sillagunerrr_reposts": {
-        "url": "https://www.tikvib.com/reposts/sillagunerrr",
+        "url": "https://tik.watch/tr/@sillagunerrr?tab=reposts",
         "name": "sillagunerrr Repostlar",
         "type": "tikvib_reposts"
     },
@@ -87,9 +87,10 @@ def load_pages() -> dict:
                 saved = json.load(f)
             if isinstance(saved, dict):
                 pages.update(saved)
-                # Güncellenen varsayılan hikaye bağlantısını senkronize et
-                if "sillagunerrr_story" in pages:
-                    pages["sillagunerrr_story"]["url"] = DEFAULT_PAGES["sillagunerrr_story"]["url"]
+                # Güncellenen varsayılan bağlantıları senkronize et
+                for default_key in ("sillagunerrr_story", "sillagunerrr_reposts"):
+                    if default_key in pages:
+                        pages[default_key]["url"] = DEFAULT_PAGES[default_key]["url"]
         except Exception:
             pass
     return pages
@@ -185,10 +186,12 @@ def check_page_count(page_info: dict, key: str) -> int:
         text = soup.get_text()
         text_lower = text.lower()
 
-        # 1. TIKVIB REPOSTLARI
-        if p_type == "tikvib_reposts":
+        # 1. REPOSTLAR (Tik.watch ve Tikvib Desteği)
+        if p_type in ("tikvib_reposts", "tikwatch_reposts", "reposts"):
+            # Tekil video/medya bağlantıları (Tik.watch /video/ ve Tikvib /media/ formatları)
             unique_media_links = set(
-                a["href"] for a in soup.select("a[href*='/media/']")
+                a["href"].split("?")[0]
+                for a in soup.select("a[href*='/media/'], a[href*='/video/']")
                 if a.get("href") and len(a["href"]) > 8
             )
             if unique_media_links:
@@ -196,19 +199,43 @@ def check_page_count(page_info: dict, key: str) -> int:
                     del LAST_ERRORS[key]
                 return len(unique_media_links)
 
-            cards = soup.select("div.posts__video-item")
+            # Video kartı kapsayıcıları
+            cards = soup.select(
+                "div.posts__video-item, [data-video-id], .video-card, "
+                ".repost-item, [data-e2e='user-repost-item']"
+            )
             if cards:
                 if key in LAST_ERRORS:
                     del LAST_ERRORS[key]
                 return len(cards)
 
-            matches = set(re.findall(r'/media/(\d+)', resp.text))
+            # Regex ile tekil video kimlikleri (/media/12345 veya /video/12345)
+            matches = set(re.findall(r'/(?:media|video)/(\d+)', resp.text))
             if matches:
                 if key in LAST_ERRORS:
                     del LAST_ERRORS[key]
                 return len(matches)
 
-            if "no reposts" in html_lower or "user has no reposts" in html_lower or "no videos" in html_lower:
+            # Sekme başlığında sayı varsa (örn. "Reposts (4)" veya "Yeniden Paylaşımlar (4)")
+            tab_repost_match = re.search(
+                r'(?:reposts?|yeniden\s*paylaşımlar?)\s*\((\d+)\)',
+                text_lower
+            )
+            if tab_repost_match:
+                if key in LAST_ERRORS:
+                    del LAST_ERRORS[key]
+                return int(tab_repost_match.group(1))
+
+            empty_repost_phrases = (
+                "no reposts",
+                "user has no reposts",
+                "no videos",
+                "henüz yeniden paylaşım",
+                "yeniden paylaşım yok",
+                "repost bulunamadı",
+                "0 reposts"
+            )
+            if any(p in html_lower or p in text_lower for p in empty_repost_phrases):
                 if key in LAST_ERRORS:
                     del LAST_ERRORS[key]
                 return 0
