@@ -22,7 +22,10 @@ except Exception:
 TELEGRAM_BOT_TOKEN = "8902458393:AAFbMG-7nAuIFnBdWsBw5xilDiUCetSkSEg"
 TELEGRAM_CHAT_ID = "6009524525"
 
-CHECK_INTERVAL_SECONDS = 900  # 15 dakikada bir kontrol
+CHECK_INTERVAL_SECONDS = 900  # Varsayılan 15 dakika
+IS_TRACKING_PAUSED = False
+SILENT_MODE = False
+
 STATE_FILE = "tracker_state.json"
 
 PAGES = {
@@ -35,13 +38,13 @@ PAGES = {
         "url": "https://viewoo.co/u/sillagunerrr?tab=reposts",
         "name": "sillagunerrr Repostlar",
         "type": "viewoo_reposts",
-        "default_val": 5,  # Senin belirttiğin doğru başlangıç değeri
+        "default_val": 5,
     },
     "userr44559014_reposts": {
         "url": "https://viewoo.co/u/userr44559014?tab=reposts",
         "name": "userr44559014 Repostlar",
         "type": "viewoo_reposts",
-        "default_val": 1,  # Senin belirttiğin doğru başlangıç değeri
+        "default_val": 1,
     },
     "sillagunerr_threads": {
         "url": "https://threadlook.com/profile/sillagunerr",
@@ -61,7 +64,18 @@ HEADERS = {
 }
 
 
-def send_telegram_message(text):
+def get_main_keyboard():
+  return {
+      "keyboard": [
+          [{"text": "📊 Durum"}, {"text": "🔍 Canlı Kontrol"}],
+          [{"text": "🔗 Sayfalar"}, {"text": "🔕 Sessiz Mod"}],
+          [{"text": "⏸ Takibi Durdur"}, {"text": "▶️ Takibi Başlat"}],
+      ],
+      "resize_keyboard": True,
+  }
+
+
+def send_telegram_message(text, reply_markup=None):
   if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
     return
   url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -69,7 +83,10 @@ def send_telegram_message(text):
       "chat_id": TELEGRAM_CHAT_ID,
       "text": text,
       "parse_mode": "Markdown",
+      "disable_notification": SILENT_MODE,
   }
+  if reply_markup:
+    payload["reply_markup"] = reply_markup
   try:
     requests.post(url, json=payload, timeout=15)
   except Exception as e:
@@ -100,20 +117,14 @@ def check_page_count(page_info, current_state_val=0):
     text = soup.get_text()
     text_lower = text.lower()
 
-    # 1. Viewoo Repost Sayımı
     if p_type == "viewoo_reposts":
-      # Sayfada geçen 19 haneli gerçek TikTok video ID'leri
       tiktok_ids = set(re.findall(r"\b7[0-6]\d{17}\b", html_text))
       if tiktok_ids:
         return len(tiktok_ids)
-
-      # Eğer dinamik yüklemeden ötürü doğrudan 0 dönerse, kullanıcının belirlediği güncel değeri koru
       if current_state_val > 0:
         return current_state_val
-
       return default_val
 
-    # 2. Hikaye Sayımı
     elif p_type == "story":
       empty_phrases = (
           "user has no stories",
@@ -140,7 +151,6 @@ def check_page_count(page_info, current_state_val=0):
         return 1
       return 0
 
-    # 3. Threads Sayımı (Threadlook)
     elif p_type == "threads":
       matches = re.findall(r"THREADS\s*(\d+)", text, re.IGNORECASE)
       if matches:
@@ -174,6 +184,10 @@ def save_state(state):
 
 
 def run_check():
+  global IS_TRACKING_PAUSED
+  if IS_TRACKING_PAUSED:
+    return
+
   current_state = load_state()
   changes = []
 
@@ -196,12 +210,13 @@ def run_check():
 
   if changes:
     msg = "🔔 *İçerik Değişikliği Algılandı!*\n\n" + "\n".join(changes)
-    send_telegram_message(msg)
+    send_telegram_message(msg, reply_markup=get_main_keyboard())
 
 
 def listen_telegram():
+  global CHECK_INTERVAL_SECONDS, IS_TRACKING_PAUSED, SILENT_MODE
   last_update_id = 0
-  print("[*] Telegram komut dinleyici aktif.")
+  print("[*] Telegram özelleştirilmiş komut dinleyici aktif.")
   while True:
     try:
       url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
@@ -217,16 +232,75 @@ def listen_telegram():
         if chat_id != TELEGRAM_CHAT_ID:
           continue
 
-        if text in ["/durum", "📊 Durum", "/kontrol"]:
+        if text in ["/start", "/yardim"]:
+          send_telegram_message(
+              "👋 Hoş geldin! Aşağıdaki butonları kullanarak botu"
+              " yönetebilirsin.",
+              reply_markup=get_main_keyboard(),
+          )
+
+        elif text in ["/durum", "📊 Durum"]:
           current_state = load_state()
           lines = ["📑 *Takip Edilen Sayfalar:*\n"]
           for key, info in PAGES.items():
             old_val = current_state.get(key, 0)
             val = check_page_count(info, current_state_val=old_val)
             current_state[key] = val
-            lines.append(f"• *{info['name']}*: `{val}`")
+            lines.append(f"• {info['name']}: `{val}`")
           save_state(current_state)
-          send_telegram_message("\n".join(lines))
+          send_telegram_message(
+              "\n".join(lines), reply_markup=get_main_keyboard()
+          )
+
+        elif text in ["/kontrol", "🔍 Canlı Kontrol"]:
+          send_telegram_message("🔎 Sayfalar taranıyor...")
+          run_check()
+          send_telegram_message(
+              "✅ Canlı kontrol tamamlandı.", reply_markup=get_main_keyboard()
+          )
+
+        elif text in ["/sayfalar", "🔗 Sayfalar"]:
+          links = ["🔗 *Takip Edilen Sayfalar:*"]
+          for k, inf in PAGES.items():
+            links.append(f"• [{inf['name']}]({inf['url']})")
+          send_telegram_message(
+              "\n".join(links), reply_markup=get_main_keyboard()
+          )
+
+        elif text in ["/durdur", "⏸ Takibi Durdur"]:
+          IS_TRACKING_PAUSED = True
+          send_telegram_message(
+              "⏸ *Otomatik takip duraklatıldı.*",
+              reply_markup=get_main_keyboard(),
+          )
+
+        elif text in ["/baslat", "▶️ Takibi Başlat"]:
+          IS_TRACKING_PAUSED = False
+          send_telegram_message(
+              "▶️ *Otomatik takip başlatıldı!*",
+              reply_markup=get_main_keyboard(),
+          )
+
+        elif text in ["/sessiz", "🔕 Sessiz Mod"]:
+          SILENT_MODE = not SILENT_MODE
+          durum = "AÇIK (Sessiz)" if SILENT_MODE else "KAPALI (Sesli)"
+          send_telegram_message(
+              f"🔕 Sessiz mod: *{durum}*", reply_markup=get_main_keyboard()
+          )
+
+        elif text.startswith("/sure"):
+          parts = text.split()
+          if len(parts) == 2 and parts[1].isdigit():
+            mins = int(parts[1])
+            CHECK_INTERVAL_SECONDS = mins * 60
+            send_telegram_message(
+                f"⏱ Kontrol sıklığı *{mins} dakika* yapıldı.",
+                reply_markup=get_main_keyboard(),
+            )
+          else:
+            send_telegram_message(
+                "⚠️ Kullanım: `/sure 10`", reply_markup=get_main_keyboard()
+            )
 
     except Exception:
       time.sleep(5)
@@ -234,7 +308,7 @@ def listen_telegram():
 
 
 def main():
-  print("Master Takip Botu Başlatıldı...")
+  print("Master Takip Botu Özelleştirilmiş Sürüm Başlatıldı...")
   t = threading.Thread(target=listen_telegram, daemon=True)
   t.start()
 
