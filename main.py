@@ -94,7 +94,7 @@ def send_telegram_message(text, reply_markup=None):
   if reply_markup:
     payload["reply_markup"] = reply_markup
   try:
-    requests.post(url, json=payload, timeout=10)
+    requests.post(url, json=payload, timeout=8)
   except Exception as e:
     print(f"[!] Gönderim hatası: {e}")
 
@@ -102,8 +102,8 @@ def send_telegram_message(text, reply_markup=None):
 def fetch_url(url):
   try:
     if IS_CLOUDSCRAPER:
-      return HTTP_CLIENT.get(url, timeout=15)
-    return requests.get(url, headers=HEADERS, timeout=15)
+      return HTTP_CLIENT.get(url, timeout=10)
+    return requests.get(url, headers=HEADERS, timeout=10)
   except Exception:
     return None
 
@@ -225,7 +225,7 @@ def handle_message(text, chat_id):
   if str(chat_id) != str(TELEGRAM_CHAT_ID):
     return
 
-  print(f"[KOMUT İŞLENİYOR]: {text}")
+  print(f"[KOMUT ALINDI]: {text}")
 
   if text in ["/start", "/yardim"]:
     send_telegram_message(
@@ -234,14 +234,12 @@ def handle_message(text, chat_id):
     )
 
   elif text in ["/durum", "📊 Durum"]:
+    # Durum komutu için siteleri anlık zorlamak yerine hafızadaki kayıtları hızlıca dönüyoruz
     current_state = load_state()
     lines = ["📑 *Takip Edilen Sayfalar:*\n"]
     for key, info in PAGES.items():
-      old_val = current_state.get(key, 0)
-      val = check_page_count(info, current_state_val=old_val)
-      current_state[key] = val
+      val = current_state.get(key, info.get("default_val", 0))
       lines.append(f"• {info['name']}: `{val}`")
-    save_state(current_state)
     send_telegram_message("\n".join(lines), reply_markup=get_main_keyboard())
 
   elif text in ["/kontrol", "🔍 Canlı Kontrol"]:
@@ -278,7 +276,6 @@ def handle_message(text, chat_id):
 
 
 def listen_telegram():
-  # Webhook kalıntısını temizle ve bekleyen güncellemeleri sıfırla
   try:
     requests.get(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=True",
@@ -288,13 +285,12 @@ def listen_telegram():
     pass
 
   last_update_id = 0
-  print("[*] Telegram komut dinleyici hazır.")
+  print("[*] Telegram dinleyici devrede.")
 
   while True:
     try:
-      url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
       resp = requests.get(
-          url,
+          f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
           params={"offset": last_update_id + 1, "timeout": 20, "limit": 10},
           timeout=25,
       ).json()
@@ -308,8 +304,8 @@ def listen_telegram():
           if text and chat_id:
             handle_message(text, chat_id)
     except Exception as e:
-      print(f"[!] Dinleme döngüsü hatası: {e}")
-      time.sleep(5)
+      print(f"[!] Dinleme hatası: {e}")
+      time.sleep(3)
 
     time.sleep(0.5)
 
