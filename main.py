@@ -25,7 +25,6 @@ TELEGRAM_CHAT_ID = "6009524525"
 CHECK_INTERVAL_SECONDS = 900  # 15 dakikada bir kontrol
 STATE_FILE = "tracker_state.json"
 
-# Repostlar için direkt ?tab=reposts sekmesi eklendi
 PAGES = {
     "sillagunerrr_story": {
         "url": "https://viewoo.co/u/sillagunerrr",
@@ -97,21 +96,25 @@ def check_page_count(page_info):
     text = soup.get_text()
     text_lower = text.lower()
 
-    # 1. Viewoo Repost Sekmesi Sayımı
+    # 1. Viewoo Repost Sayımı (24'lü şablon hatasını önlemek için sadece gerçek TikTok ID'leri ve post linkleri sayılır)
     if p_type == "viewoo_reposts":
-      # Sayfada listelenen video kartlarını veya medya ögelerini bulalım
-      items = soup.select(
-          "div.posts__video-item, [data-video-id], .video-card, .post-item,"
-          " a[href*='/video/'], div.grid > div, .card"
-      )
-      if items:
-        unique_items = set(str(item) for item in items)
-        return len(unique_items)
+      # Sayfada geçen 19 haneli gerçek TikTok video ID'lerini bul (En kesin yöntem)
+      tiktok_ids = set(re.findall(r"\b7[0-6]\d{17}\b", html_text))
+      if tiktok_ids:
+        return len(tiktok_ids)
 
-      # Alternatif olarak sayfa metninde veya sayaç badge'lerinde geçen rakamları kontrol et
-      numbers = [int(n) for n in re.findall(r"\b\d+\b", text) if int(n) < 50]
-      if numbers:
-        return numbers[0]
+      # Alternatif olarak geçerli video/post bağlantılarını filtrele
+      links = soup.select("a[href*='/video/'], a[href*='/post/']")
+      valid_links = set(
+          a.get("href")
+          for a in links
+          if not any(
+              x in a.get("href", "").lower()
+              for x in ("viewer", "profile", "comment", "story")
+          )
+      )
+      if valid_links:
+        return len(valid_links)
 
       return 0
 
