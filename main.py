@@ -46,6 +46,12 @@ PAGES = {
         "type": "viewoo_reposts",
         "default_val": 1,
     },
+    "emin_htp_reposts": {
+        "url": "https://viewoo.co/u/emin_htp?tab=reposts",
+        "name": "emin_htp Repostlar",
+        "type": "viewoo_reposts",
+        "default_val": 0,
+    },
     "sillagunerr_threads": {
         "url": "https://threadlook.com/profile/sillagunerr",
         "name": "sillagunerr Threads",
