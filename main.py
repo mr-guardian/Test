@@ -94,22 +94,3 @@ def check_sites_logic(bot_instance):
     res = requests.get(url, headers=headers, timeout=15)
     if res.status_code == 200:
       soup = BeautifulSoup(res.text, "html.parser")
-      page_text = soup.get_text()
-      if last_states["tik_2"] is None:
-        last_states["tik_2"] = page_text
-      elif last_states["tik_2"] != page_text:
-        last_states["tik_2"] = page_text
-        send_msg(
-            f"🔔 **Tik.watch 2 Güncellemesi!**\n{url}\n🔄 Repost sayısında veya"
-            " içerikte değişiklik algılandı!"
-        )
-  except Exception aset:  # Hata yakalama
-    logger.error(f"Tik.watch 2 hata: {aset}")
-  except Exception as e:
-    logger.error(f"Tik.watch 2 hata: {e}")
-
-  # --- 4. Threadlook Kontrolü (119 Değeri) ---
-  try:
-    url = "https://threadlook.com/profile/sillagunerr"
-    res = requests.get(url, headers=headers, timeout=15)
-    if res.status_code == 200:
