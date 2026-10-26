@@ -6,7 +6,6 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 
-# Loglama ayarları
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -150,5 +149,5 @@ if __name__ == "__main__":
   app.add_handler(CommandHandler("kontrol", cmd_kontrol))
   app.add_handler(CommandHandler("durum", cmd_durum))
 
-  logger.info("Bot Aktif ve Çalışıyor!")
+  logger.info("Bot Aktif ve Başarıyla Başlatıldı!")
   app.run_polling()
