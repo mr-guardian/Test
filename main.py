@@ -25,7 +25,7 @@ TELEGRAM_CHAT_ID = "6009524525"
 CHECK_INTERVAL_SECONDS = 900  # 15 dakikada bir kontrol
 STATE_FILE = "tracker_state.json"
 
-# Senin belirttiğin Viewoo ve diğer güncel kaynak adresleri
+# Tüm profilleri Viewoo ve Threadlook üzerinden güncelledik
 PAGES = {
     "sillagunerrr_story": {
         "url": "https://viewoo.co/u/sillagunerrr",
@@ -38,9 +38,9 @@ PAGES = {
         "type": "viewoo_reposts",
     },
     "userr44559014_reposts": {
-        "url": "https://tik.watch/tr/@userr44559014?tab=reposts",
+        "url": "https://viewoo.co/u/userr44559014",
         "name": "userr44559014 Repostlar",
-        "type": "reposts",
+        "type": "viewoo_reposts",
     },
     "sillagunerr_threads": {
         "url": "https://threadlook.com/profile/sillagunerr",
@@ -94,52 +94,28 @@ def check_page_count(page_info):
     text = soup.get_text()
     text_lower = text.lower()
 
-    # 1. Viewoo Sayfasındaki Repostlar (Sillagunerrr Repostlar)
+    # 1. Viewoo Sayfasındaki Repostlar
     if p_type == "viewoo_reposts":
-      # Sayfada repost sekmesi veya repost sayaç etiketlerini / kartlarını arayalım
-      # Repost kartlarını veya video/post elemanlarını say
       repost_items = soup.select(
           ".repost-item, [data-repost], .post-card, .video-item, div[class*='repost']"
       )
       if repost_items:
         return len(repost_items)
 
-      # Eğer genel 19 haneli TikTok ID'leri varsa
       tiktok_ids = set(re.findall(r"\b7[0-6]\d{17}\b", html_text))
       if tiktok_ids:
         return len(tiktok_ids)
 
-      # Sayfadaki rakamlar arasında arama yapalım (Örn: 5 hedefimiz)
-      numbers = [int(n) for n in re.findall(r"\b\d+\b", text) if int(n) < 50]
-      if numbers:
-        # Mantıklı bir repost sayısı seçelim (örneğin 5)
-        for n in numbers:
-          if n == 5:
-            return 5
-      return 5  # Belirttiğin değere göre taban referans
-
-    # 2. Diğer Repostlar (Tik.watch vb.)
-    elif p_type == "reposts":
-      tiktok_video_ids = set(re.findall(r"\b7[0-6]\d{17}\b", html_text))
-      if tiktok_video_ids:
-        return len(tiktok_video_ids)
-
-      unique_media = set(
-          a.get("href")
-          for a in soup.select(
-              "a[href*='/media/'], a[href*='/video/'], a[href*='/post/']"
-          )
-          if a.get("href")
-          and not any(
-              x in a.get("href", "").lower()
-              for x in ("viewer", "profile", "comment")
-          )
+      # Sayfa içerisindeki ilk mantıklı post/video elemanlarını sayalım
+      posts = soup.select(
+          "a[href*='/video/'], a[href*='/post/'], div.grid > div"
       )
-      if unique_media:
-        return len(unique_media)
+      if posts:
+        return len(posts)
+
       return 0
 
-    # 3. Hikaye Sayımı
+    # 2. Hikaye Sayımı
     elif p_type == "story":
       empty_phrases = (
           "user has no stories",
@@ -166,7 +142,7 @@ def check_page_count(page_info):
         return 1
       return 0
 
-    # 4. Threads Sayımı
+    # 3. Threads Sayımı
     elif p_type == "threads":
       matches = re.findall(r"THREADS\s*(\d+)", text, re.IGNORECASE)
       if matches:
