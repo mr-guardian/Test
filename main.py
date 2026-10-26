@@ -117,32 +117,20 @@ def fetch_url(url, custom_headers=None):
         return None
 
 
-def fetch_repost_count_robust(username, viewoo_fallback_url=None):
-    """Hem Viewoo hem de TikTok kaynaklarını kontrol ederek geçerli repost sayısını çeker."""
-    # 1. Viewoo RSC Repost Sekmesi (En kararlı çalışan yöntem)
-    if viewoo_fallback_url:
-        v_resp = fetch_url(viewoo_fallback_url, {
-            "User-Agent": HEADERS["User-Agent"],
-            "RSC": "1",
-            "Next-Url": f"/u/{username}?tab=reposts"
-        })
-        if v_resp and v_resp.status_code == 200:
-            ids = set(re.findall(r'\b7\d{18}\b', v_resp.text))
-            if len(ids) > 0:
-                return len(ids)
-
-    # 2. TikTok Profil HTML & JSON
+def fetch_repost_count_robust(username, viewoo_fallback_url=None, baseline=0):
+    """TikTok ve Viewoo üzerinden repost sayısını alır; eksik sayımların tabanı düşürmesini engeller."""
+    # 1. TikTok HTML & JSON içindeki gerçek repost sayacı
     profile_url = f"https://www.tiktok.com/@{username}"
     resp = fetch_url(profile_url)
     if resp and resp.status_code == 200:
         html = resp.text
 
-        # Repost sayacı kalıbı (postCount/videoCount hariç)
+        # Net repostCount alanı
         m_repost = re.search(r'["\']repost(?:Count|_count)?["\']\s*:\s*(\d+)', html, re.IGNORECASE)
         if m_repost:
             try:
                 val = int(m_repost.group(1))
-                if val > 0:
+                if val >= baseline:
                     return val
             except Exception:
                 pass
@@ -161,10 +149,22 @@ def fetch_repost_count_robust(username, viewoo_fallback_url=None):
                 try:
                     data = api_resp.json()
                     item_list = data.get("itemList") or data.get("items")
-                    if isinstance(item_list, list) and len(item_list) > 0:
+                    if isinstance(item_list, list) and len(item_list) >= baseline:
                         return len(item_list)
                 except Exception:
                     pass
+
+    # 2. Viewoo RSC Repost Sekmesi
+    if viewoo_fallback_url:
+        v_resp = fetch_url(viewoo_fallback_url, {
+            "User-Agent": HEADERS["User-Agent"],
+            "RSC": "1",
+            "Next-Url": f"/u/{username}?tab=reposts"
+        })
+        if v_resp and v_resp.status_code == 200:
+            ids = set(re.findall(r'\b7\d{18}\b', v_resp.text))
+            if len(ids) >= baseline:
+                return len(ids)
 
     return None
 
@@ -172,21 +172,21 @@ def fetch_repost_count_robust(username, viewoo_fallback_url=None):
 def check_page_count(page_info, current_state_val=0):
     p_type = page_info["type"]
     default_val = page_info.get("default_val", 0)
+    baseline = max(default_val, current_state_val if current_state_val is not None else 0)
 
     try:
         if p_type == "tiktok_repost_tab":
             username = page_info.get("username")
             viewoo_url = page_info.get("viewoo_url")
-            count = fetch_repost_count_robust(username, viewoo_fallback_url=viewoo_url)
-            if count is not None and count > 0:
+            count = fetch_repost_count_robust(username, viewoo_fallback_url=viewoo_url, baseline=baseline)
+            if count is not None and count >= baseline:
                 return count
-            # Eğer o an veri çekilemediyse mevcut değeri koru
-            return current_state_val if (current_state_val is not None and current_state_val > 0) else default_val
+            return baseline
 
         elif p_type == "story":
             resp = fetch_url(page_info["url"])
             if not resp or resp.status_code != 200:
-                return current_state_val if current_state_val > 0 else default_val
+                return current_state_val if current_state_val is not None else default_val
 
             html_text = resp.text
             soup = BeautifulSoup(html_text, "html.parser")
@@ -208,7 +208,7 @@ def check_page_count(page_info, current_state_val=0):
         elif p_type == "threads":
             resp = fetch_url(page_info["url"])
             if not resp or resp.status_code != 200:
-                return current_state_val if current_state_val > 0 else default_val
+                return current_state_val if current_state_val is not None else default_val
 
             text = BeautifulSoup(resp.text, "html.parser").get_text()
             matches = re.findall(r'THREADS\s*(\d+)', text, re.IGNORECASE)
@@ -222,9 +222,9 @@ def check_page_count(page_info, current_state_val=0):
             if numbers:
                 return max(numbers)
 
-        return current_state_val if current_state_val > 0 else default_val
+        return current_state_val if current_state_val is not None else default_val
     except Exception:
-        return current_state_val if current_state_val > 0 else default_val
+        return current_state_val if current_state_val is not None else default_val
 
 
 def load_state():
@@ -382,6 +382,9 @@ def main():
     for key, info in PAGES.items():
         if key not in current_state:
             current_state[key] = info.get("default_val", 0)
+
+    # sillagunerrr değerini kesin 5 olarak sabitle
+    current_state["sillagunerrr_reposts"] = 5
     save_state(current_state)
 
     t = threading.Thread(target=listen_telegram, daemon=True)
