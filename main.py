@@ -22,10 +22,9 @@ except Exception:
 TELEGRAM_BOT_TOKEN = "8902458393:AAFbMG-7nAuIFnBdWsBw5xilDiUCetSkSEg"
 TELEGRAM_CHAT_ID = "6009524525"
 
-CHECK_INTERVAL_SECONDS = 900  # 15 dakikada bir kontrol
+CHECK_INTERVAL_SECONDS = 900
 STATE_FILE = "tracker_state.json"
 
-# Her profil ve içerik türü için doğru ve test edilmiş adresler
 PAGES = {
     "sillagunerrr_story": {
         "url": "https://viewoo.co/u/sillagunerrr",
@@ -33,14 +32,14 @@ PAGES = {
         "type": "story",
     },
     "sillagunerrr_reposts": {
-        "url": "https://tik.watch/tr/@sillagunerrr?tab=reposts",
+        "url": "https://tikwm.com/api/user/posts?unique_id=sillagunerrr&count=35",
         "name": "sillagunerrr Repostlar",
-        "type": "tikwatch_reposts",
+        "type": "api_reposts",
     },
     "userr44559014_reposts": {
-        "url": "https://viewoo.co/u/userr44559014",
+        "url": "https://tikwm.com/api/user/posts?unique_id=userr44559014&count=35",
         "name": "userr44559014 Repostlar",
-        "type": "viewoo_reposts",
+        "type": "api_reposts",
     },
     "sillagunerr_threads": {
         "url": "https://threadlook.com/profile/sillagunerr",
@@ -54,9 +53,7 @@ HEADERS = {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
         " like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept": (
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
-    ),
+    "Accept": "application/json, text/html,application/xhtml+xml,*/*",
 }
 
 
@@ -76,9 +73,14 @@ def send_telegram_message(text):
 
 
 def fetch_url(url):
-  if IS_CLOUDSCRAPER:
-    return HTTP_CLIENT.get(url, timeout=25)
-  return requests.get(url, headers=HEADERS, timeout=25)
+  try:
+    if "tikwm.com" in url or "threadlook.com" in url:
+      return requests.get(url, headers=HEADERS, timeout=25)
+    if IS_CLOUDSCRAPER:
+      return HTTP_CLIENT.get(url, timeout=25)
+    return requests.get(url, headers=HEADERS, timeout=25)
+  except Exception:
+    return None
 
 
 def check_page_count(page_info):
@@ -89,55 +91,24 @@ def check_page_count(page_info):
     if not resp or resp.status_code != 200:
       return -1
 
+    # 1. API Üzerinden Repost Sayımı (Kesin Çözüm)
+    if p_type == "api_reposts":
+      try:
+        data = resp.json()
+        if data.get("code") == 0:
+          videos = data.get("data", {}).get("videos", [])
+          return len(videos)
+      except Exception:
+        pass
+      return 0
+
     html_text = resp.text
     soup = BeautifulSoup(html_text, "html.parser")
     text = soup.get_text()
     text_lower = text.lower()
 
-    # 1. Viewoo üzerinden Repostlar (userr44559014 için)
-    if p_type == "viewoo_reposts":
-      repost_items = soup.select(
-          ".repost-item, [data-repost], .post-card, .video-item, div[class*='repost']"
-      )
-      if repost_items:
-        return len(repost_items)
-
-      posts = soup.select(
-          "a[href*='/video/'], a[href*='/post/'], div.grid > div"
-      )
-      if posts:
-        return len(posts)
-      return 0
-
-    # 2. Tik.watch üzerinden Repostlar (sillagunerrr için)
-    elif p_type == "tikwatch_reposts":
-      tiktok_video_ids = set(re.findall(r"\b7[0-6]\d{17}\b", html_text))
-      if len(tiktok_video_ids) > 1:
-        return len(tiktok_video_ids)
-
-      unique_media = set(
-          a.get("href")
-          for a in soup.select(
-              "a[href*='/media/'], a[href*='/video/'], a[href*='/post/']"
-          )
-          if a.get("href")
-          and not any(
-              x in a.get("href", "").lower()
-              for x in ("viewer", "profile", "comment")
-          )
-      )
-      if unique_media:
-        return len(unique_media)
-
-      cards = soup.select(
-          "div.posts__video-item, [data-video-id], .video-card, .repost-item"
-      )
-      if cards:
-        return len(cards)
-      return 0
-
-    # 3. Hikaye Sayımı
-    elif p_type == "story":
+    # 2. Hikaye Sayımı
+    if p_type == "story":
       empty_phrases = (
           "user has no stories",
           "no stories",
@@ -163,7 +134,7 @@ def check_page_count(page_info):
         return 1
       return 0
 
-    # 4. Threads Sayımı
+    # 3. Threads Sayımı
     elif p_type == "threads":
       matches = re.findall(r"THREADS\s*(\d+)", text, re.IGNORECASE)
       if matches:
