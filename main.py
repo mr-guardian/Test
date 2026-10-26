@@ -1,8 +1,8 @@
-import json
 import os
 import re
-import threading
 import time
+import json
+import threading
 import requests
 from bs4 import BeautifulSoup
 
@@ -99,46 +99,41 @@ def send_telegram_message(text, reply_markup=None):
         print(f"[!] Gönderim hatası: {e}")
 
 
-def fetch_reposts_direct(username):
-    """Viewoo'nun Next.js Server Component altyapısından repost sekmesini doğrudan ister."""
-    target_url = f"https://viewoo.co/u/{username}?tab=reposts"
-    custom_headers = HEADERS.copy()
-    custom_headers.update({
-        "RSC": "1",
-        "Next-Url": f"/u/{username}?tab=reposts",
-        "Accept": "*/*"
-    })
-
+def fetch_url(url, custom_headers=None):
+    h = custom_headers or HEADERS
     try:
         if IS_CLOUDSCRAPER:
-            r = HTTP_CLIENT.get(target_url, headers=custom_headers, timeout=12)
-        else:
-            r = requests.get(target_url, headers=custom_headers, timeout=12)
-
-        if r.status_code == 200:
-            text = r.text
-            # TikTok video ID'leri (19 haneli 7 ile başlayan sayılar)
-            video_ids = set(re.findall(r'\b7\d{18}\b', text))
-            if video_ids:
-                return len(video_ids)
-
-            # JSON veya RSC akışı içindeki item eşleşmeleri
-            items = set(re.findall(r'["\'](?:video_id|aweme_id|id)["\']\s*:\s*["\']?(\d{15,20})', text))
-            if items:
-                return len(items)
-    except Exception as e:
-        print(f"[!] Repost RSC çekme hatası: {e}")
-
-    return None
-
-
-def fetch_url(url):
-    try:
-        if IS_CLOUDSCRAPER:
-            return HTTP_CLIENT.get(url, timeout=12)
-        return requests.get(url, headers=HEADERS, timeout=12)
+            return HTTP_CLIENT.get(url, headers=h, timeout=12)
+        return requests.get(url, headers=h, timeout=12)
     except Exception:
         return None
+
+
+def fetch_repost_count_dynamic(username):
+    """Viewoo API ve sayfa akışından repost sayısını dener."""
+    api_url = f"https://viewoo.co/api/resolve?target=https://www.tiktok.com/@{username}"
+    resp = fetch_url(api_url, {"User-Agent": HEADERS["User-Agent"], "Accept": "application/json"})
+    if resp and resp.status_code == 200:
+        try:
+            data = resp.json()
+            matches = set(re.findall(r'\b7\d{18}\b', json.dumps(data)))
+            if len(matches) > 0:
+                return len(matches)
+        except Exception:
+            pass
+
+    rsc_url = f"https://viewoo.co/u/{username}?tab=reposts"
+    rsc_resp = fetch_url(rsc_url, {
+        "User-Agent": HEADERS["User-Agent"],
+        "RSC": "1",
+        "Next-Url": f"/u/{username}?tab=reposts"
+    })
+    if rsc_resp and rsc_resp.status_code == 200:
+        ids = set(re.findall(r'\b7\d{18}\b', rsc_resp.text))
+        if len(ids) > 0:
+            return len(ids)
+
+    return None
 
 
 def check_page_count(page_info, current_state_val=0):
@@ -151,21 +146,21 @@ def check_page_count(page_info, current_state_val=0):
             m = re.search(r'/u/([^/?]+)', url)
             if m:
                 username = m.group(1)
-                rsc_count = fetch_reposts_direct(username)
-                if rsc_count is not None:
-                    return rsc_count
+                dyn_count = fetch_repost_count_dynamic(username)
+                if dyn_count is not None and dyn_count > 0:
+                    return dyn_count
 
-            # Normal fallback
             resp = fetch_url(url)
             if resp and resp.status_code == 200:
                 ids = set(re.findall(r'\b7\d{18}\b', resp.text))
-                if ids:
+                if len(ids) > 0:
                     return len(ids)
-            return current_state_val if current_state_val > 0 else default_val
+
+            return current_state_val if current_state_val is not None else default_val
 
         resp = fetch_url(url)
         if not resp or resp.status_code != 200:
-            return current_state_val if current_state_val > 0 else default_val
+            return current_state_val if current_state_val is not None else default_val
 
         html_text = resp.text
         soup = BeautifulSoup(html_text, "html.parser")
@@ -198,9 +193,9 @@ def check_page_count(page_info, current_state_val=0):
             if numbers:
                 return max(numbers)
 
-        return current_state_val if current_state_val > 0 else default_val
+        return current_state_val if current_state_val is not None else default_val
     except Exception:
-        return current_state_val if current_state_val > 0 else default_val
+        return current_state_val if current_state_val is not None else default_val
 
 
 def load_state():
@@ -354,10 +349,14 @@ def listen_telegram():
 def main():
     print("Master Takip Botu Başlatıldı...")
 
+    # Başlangıç değerlerini eşitle (emin_htp_reposts = 0 olarak sabitlenir)
     current_state = load_state()
     for key, info in PAGES.items():
         if key not in current_state:
             current_state[key] = info.get("default_val", 0)
+    
+    # emin_htp tabanını doğrudan 0'a çekelim
+    current_state["emin_htp_reposts"] = 0
     save_state(current_state)
 
     t = threading.Thread(target=listen_telegram, daemon=True)
