@@ -99,6 +99,16 @@ def send_telegram_message(text, reply_markup=None):
     print(f"[!] Gönderim hatası: {e}")
 
 
+def clear_webhook():
+  """Telegram'da takılı kalmış olabilecek webhook bağlantısını temizler"""
+  try:
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=True"
+    requests.get(url, timeout=10)
+    print("[*] Webhook temizlendi, polling aktifleşti.")
+  except Exception as e:
+    print(f"[!] Webhook temizleme hatası: {e}")
+
+
 def fetch_url(url):
   try:
     if IS_CLOUDSCRAPER:
@@ -221,13 +231,13 @@ def run_check():
 
 def listen_telegram():
   global CHECK_INTERVAL_SECONDS, IS_TRACKING_PAUSED, SILENT_MODE
+  clear_webhook()  # Başlangıçta webhook'u temizle
   last_update_id = 0
-  print("[*] Telegram komut dinleyici aktif ve optimize edildi.")
+  print("[*] Telegram komut dinleyici aktif.")
 
   while True:
     try:
       url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-      # Eski birikmiş güncellemeleri atlamak ve timeout'u düşürmek için
       r = requests.get(
           url,
           params={"offset": last_update_id + 1, "timeout": 10, "limit": 10},
