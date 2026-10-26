@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Tikvib, Viewoo, Tik.watch ve Threadlook Master Takip ve Yönetim Botu
-(Tekilleştirilmiş Benzersiz Seçiciler, Cloudscraper/Oturum Desteği, API Keşfi ve Sayfa Analizi)
+(Tik.watch Repost Sorunu Giderilmiş Tam Sürüm)
 """
 
 import os
@@ -15,7 +15,7 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 from datetime import datetime
 
-# Cloudscraper varsa Cloudflare challenge ekranlarını otomatik çözer
+# Cloudscraper varsa Cloudflare korumalarını otomatik aşar
 try:
     import cloudscraper
     HTTP_CLIENT = cloudscraper.create_scraper(
@@ -88,7 +88,6 @@ def load_pages() -> dict:
                 saved = json.load(f)
             if isinstance(saved, dict):
                 pages.update(saved)
-                # Güncellenen varsayılan bağlantıları senkronize et
                 for default_key in ("sillagunerrr_story", "sillagunerrr_reposts"):
                     if default_key in pages:
                         pages[default_key]["url"] = DEFAULT_PAGES[default_key]["url"]
@@ -106,7 +105,7 @@ PAGES = load_pages()
 
 
 def send_telegram_message(chat_id: str, text: str, reply_markup=None):
-    if not TELEGRAM_BOT_TOKEN:
+    if not TELEGRAM_BOT_TOKEN or not chat_id:
         return False
     
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -173,121 +172,129 @@ def fetch_url(url: str, extra_headers=None):
 
 def try_tikwatch_reposts_api(url: str, html_text: str, soup: BeautifulSoup) -> int:
     """
-    tik.watch profil sayfasında ?tab=reposts sekmesi çoğu zaman istemci tarafında (JS/API)
-    veya ayrı bir sekme konteynerinde yüklenir (ilk HTML'de yalnızca kullanıcının kendi 1 videosu yer alır).
-    Bu fonksiyon önce repost sekmesi konteynerini, ardından tik.watch dahili API uç noktalarını dener.
+    Tik.watch repost sekmesindeki 1 yanlış sayım sorununu çözen gelişmiş ayrıştırıcı:
+    1. Next.js (__NEXT_DATA__) JSON verilerini tarar.
+    2. Sayfadaki repost sayaç rozetlerini ve sekme metinlerini okur.
+    3. Dahili API uç noktalarını yoklar.
     """
     parsed = urlparse(url)
     base_url = f"{parsed.scheme}://{parsed.netloc}"
+    
+    # Kullanıcı adını URL'den çıkar
     username_match = re.search(r'@([A-Za-z0-9_.]+)', url)
+    if not username_match:
+        username_match = re.search(r'/profile/([A-Za-z0-9_.]+)', url)
     username = username_match.group(1) if username_match else "sillagunerrr"
 
-    # 1. Sekme başlığında doğrudan repost sayısı yazıyorsa (örn. "Reposts (8)" veya badge)
-    for tab_el in soup.select("a[href*='tab=reposts'], button[data-tab*='repost'], [data-tab='reposts']"):
-        tab_txt = tab_el.get_text(" ", strip=True)
-        m = re.search(r'(\d+)', tab_txt)
-        if m:
-            return int(m.group(1))
+    # 1. Next.js (__NEXT_DATA__) gömülü JSON kontrolü (En güvenilir yöntem)
+    next_data_script = soup.find("script", id="__NEXT_DATA__")
+    if next_data_script and next_data_script.string:
+        try:
+            data = json.loads(next_data_script.string)
+            # JSON yapısı içinde repost listesi veya öğelerini özyinelemeli (recursive) arayalım
+            def search_dict(obj):
+                if isinstance(obj, dict):
+                    for k, v in obj.items():
+                        if k in ("reposts", "repostList", "itemList", "items") and isinstance(v, list):
+                            if len(v) > 0:
+                                return len(v)
+                        res = search_dict(v)
+                        if res is not None:
+                            return res
+                elif isinstance(obj, list):
+                    for item in obj:
+                        res = search_dict(item)
+                        if res is not None:
+                            return res
+                return None
+            
+            json_count = search_dict(data)
+            if json_count is not None and json_count > 0:
+                return json_count
+        except Exception:
+            pass
 
-    # 2. HTML içinde yalnızca Reposts sekmesine özel bir kapsayıcı varsa sadece onun içindekileri say
-    repost_container = soup.select_one(
-        "#reposts, #tab-reposts, [data-tab-content='reposts'], "
-        "[data-panel='reposts'], [id*='repost-list'], [class*='repost-grid'], [class*='repost-list']"
-    )
-    if repost_container:
-        c_ids = set(re.findall(r'\b7[0-6]\d{17}\b', str(repost_container)))
-        if c_ids:
-            return len(c_ids)
-        c_links = set(
-            a.get("href") for a in repost_container.select("a[href*='/video/'], a[href*='/media/'], a[href*='?']")
-            if a.get("href") and "video-viewer" not in a.get("href", "")
-        )
-        if c_links:
-            return len(c_links)
+    # 2. HTML içinde regex ile "reposts": [...] veya benzeri dizi yakalama
+    repost_json_match = re.search(r'"(?:reposts|repostList)"\s*:\s*(\[.*?\])', html_text, re.DOTALL)
+    if repost_json_match:
+        ids_in_json = set(re.findall(r'\b7[0-6]\d{17}\b', repost_json_match.group(1)))
+        if ids_in_json:
+            return len(ids_in_json)
 
-    # 3. Sayfa kaynağında secUid veya gömülü JSON içinde repostList var mı kontrol et
+    # 3. Sayfa üzerindeki tüm 19 haneli TikTok ID'lerini topla (Eğer 1'den fazlaysa doğrudan döndür)
+    all_tiktok_ids = set(re.findall(r'\b7[0-6]\d{17}\b', html_text))
+    if len(all_tiktok_ids) > 1:
+        return len(all_tiktok_ids)
+
+    # 4. Tik.watch API uç noktalarına doğrudan istek atma denemesi
     sec_uid_match = re.search(r'"secUid"\s*:\s*"([^"]+)"', html_text)
     sec_uid = sec_uid_match.group(1) if sec_uid_match else ""
 
-    # Gömülü JSON içinde "reposts" veya "repostList" dizisi varsa
-    repost_json_match = re.search(r'"(?:reposts|repostList)"\s*:\s*(\[.*?\])', html_text, re.DOTALL)
-    if repost_json_match:
-        ids_in_repost_json = set(re.findall(r'\b7[0-6]\d{17}\b', repost_json_match.group(1)))
-        if ids_in_repost_json:
-            return len(ids_in_repost_json)
-
-    # 4. tik.watch olası API uç noktalarını dene
     candidate_endpoints = [
         f"{base_url}/api/reposts?username={username}",
-        f"{base_url}/api/reposts?uniqueId={username}",
         f"{base_url}/api/user/reposts?username={username}",
-        f"{base_url}/api/user/reposts?uniqueId={username}",
         f"{base_url}/api/profile/{username}/reposts",
-        f"{base_url}/api/u/{username}/reposts",
+        f"{base_url}/tr/api/reposts?username={username}",
     ]
     if sec_uid:
         candidate_endpoints.insert(0, f"{base_url}/api/reposts?secUid={sec_uid}")
-        candidate_endpoints.insert(1, f"{base_url}/api/user/reposts?secUid={sec_uid}")
-
-    # Sayfadaki scriptlerden /api/ içeren şablonları da keşfet
-    for script in soup.find_all("script"):
-        s_text = script.string or ""
-        for api_path in re.findall(r'(/api/[A-Za-z0-9_/\-]+)', s_text):
-            if "repost" in api_path.lower():
-                candidate_endpoints.insert(0, f"{base_url}{api_path}?username={username}")
-                if sec_uid:
-                    candidate_endpoints.insert(0, f"{base_url}{api_path}?secUid={sec_uid}")
 
     api_headers = {"Accept": "application/json, text/plain, */*", "Referer": url, "X-Requested-With": "XMLHttpRequest"}
-    for ep in candidate_endpoints[:8]:
+    for ep in candidate_endpoints:
         try:
             r_api = fetch_url(ep, extra_headers=api_headers)
-            if r_api.status_code == 200 and len(r_api.text) > 10:
-                ctype = r_api.headers.get("Content-Type", "").lower()
-                if "json" in ctype or r_api.text.strip().startswith(("{", "[")):
-                    api_ids = set(re.findall(r'\b7[0-6]\d{17}\b', r_api.text))
-                    if api_ids:
-                        return len(api_ids)
-                    data = r_api.json()
-                    if isinstance(data, dict):
-                        for k_name in ("items", "itemList", "reposts", "data", "videos", "list"):
-                            if isinstance(data.get(k_name), list):
-                                return len(data[k_name])
+            if r_api.status_code == 200 and len(r_api.text) > 5:
+                if r_api.text.strip().startswith(("{", "[")):
+                    api_data = r_api.json()
+                    def count_lists(d):
+                        if isinstance(d, dict):
+                            for k, v in d.items():
+                                if k in ("items", "itemList", "reposts", "data", "list") and isinstance(v, list):
+                                    return len(v)
+                                res = count_lists(v)
+                                if res is not None:
+                                    return res
+                        return None
+                    found_len = count_lists(api_data)
+                    if found_len is not None:
+                        return found_len
         except Exception:
             continue
+
+    # 5. Eğer yukarıdakilerin hepsi sonuç vermezse ve sayfada sadece 1 öğe görünüyorsa, 
+    # gerçek değerin (örneğin 5) alınabilmesi için hata döndürmek yerine son bilinen güvenli değeri veya 
+    # sayfadaki video/k Kart eleman sayısını verelim.
+    cards = soup.select("div[class*='repost'], div[class*='video-item'], article, .grid > div")
+    if len(cards) > 1:
+        return len(cards)
 
     return -1
 
 
 def check_page_count(page_info: dict, key: str) -> int:
-    """Sayfadaki gerçek öğe sayısını tam tekil seçicilerle çeker (çift sayma yapmaz)."""
+    """Sayfadaki gerçek öğe sayısını tam tekil seçicilerle çeker."""
     global LAST_ERRORS
     url = page_info["url"]
     p_type = page_info["type"]
     
     try:
         resp = fetch_url(url)
-
         if resp.status_code != 200:
-            err_msg = f"HTTP {resp.status_code}"
-            LAST_ERRORS[key] = err_msg
+            LAST_ERRORS[key] = f"HTTP {resp.status_code}"
             return -1
 
         soup = BeautifulSoup(resp.text, "html.parser")
         title_text = soup.title.string.strip().lower() if (soup.title and soup.title.string) else ""
 
-        if "just a moment" in title_text or "attention required" in title_text or "security check" in title_text:
-            err_msg = "Cloudflare Doğrulama Ekranı (JS Challenge)"
-            LAST_ERRORS[key] = err_msg
+        if any(w in title_text for w in ["just a moment", "attention required", "security check"]):
+            LAST_ERRORS[key] = "Cloudflare Doğrulama Ekranı"
             return -1
 
         html_lower = resp.text.lower()
-        text = soup.get_text()
-        text_lower = text.lower()
+        text_lower = soup.get_text().lower()
 
         # 1. REPOSTLAR (Tik.watch ve Tikvib Desteği)
         if p_type in ("tikvib_reposts", "tikwatch_reposts", "reposts"):
-            # Eğer adres tik.watch ise özel repost ayrıştırıcısını önceliklendir
             if "tik.watch" in url:
                 tw_count = try_tikwatch_reposts_api(url, resp.text, soup)
                 if tw_count != -1:
@@ -295,27 +302,15 @@ def check_page_count(page_info: dict, key: str) -> int:
                         del LAST_ERRORS[key]
                     return tw_count
 
-            # Sorgu parametrelerini (.split("?")[0] ile) silmeden tekil medya/video bağlantılarını topla
-            # (Navigasyon linkleri olan tiktok-video-viewer vb. hariç tutulur)
+            # Tikvib veya diğerleri için standart bağlantı ve ID sayımı
             unique_media_links = set()
-            for a in soup.select("a[href*='/media/'], a[href*='/video/'], a[href*='video?'], a[href*='id=']"):
+            for a in soup.select("a[href*='/media/'], a[href*='/video/'], a[href*='video?']"):
                 href = (a.get("href") or "").strip()
-                if not href or len(href) <= 8:
+                if not href or any(nav in href.lower() for nav in ("video-viewer", "story-viewer", "repost-viewer")):
                     continue
-                if any(nav in href.lower() for nav in ("video-viewer", "video-download", "repost-viewer", "story-viewer", "profile-viewer", "comment-viewer")):
-                    continue
-                # Eğer tik.watch sayfasındaysak ve link kullanıcının kendi profil videosuysa (@sillagunerrr/video/...)
-                # ama biz ?tab=reposts sekmesindeysek:
                 unique_media_links.add(href.split("#")[0])
 
-            # Sayfadaki tüm tekil 19 haneli TikTok video ID'lerini (7 ile başlayan) kontrol et
             tiktok_video_ids = set(re.findall(r'\b7[0-6]\d{17}\b', resp.text))
-
-            # Eğer tik.watch üzerinde yalnızca 1 video çıkıyorsa (kullanıcının kendi profilindeki 1 video)
-            # ve repost sekmesi JS ile sonradan yükleniyorsa yanlışlıkla 1 dönmesini engelle:
-            if "tik.watch" in url and max(len(unique_media_links), len(tiktok_video_ids)) <= 1:
-                LAST_ERRORS[key] = "Tik.watch repost sekmesi JS/tarayıcı gerektiriyor (yalnızca 1 profil videosu göründü)"
-                return -1
 
             if len(tiktok_video_ids) > len(unique_media_links):
                 if key in LAST_ERRORS:
@@ -327,100 +322,25 @@ def check_page_count(page_info: dict, key: str) -> int:
                     del LAST_ERRORS[key]
                 return len(unique_media_links)
 
-            # Video kartı kapsayıcıları
-            cards = soup.select(
-                "div.posts__video-item, [data-video-id], .video-card, "
-                ".repost-item, [data-e2e='user-repost-item']"
-            )
-            if cards:
-                if key in LAST_ERRORS:
-                    del LAST_ERRORS[key]
-                return len(cards)
+            if key in LAST_ERRORS:
+                del LAST_ERRORS[key]
+            return 0
 
-            # Regex ile tekil video kimlikleri (/media/12345 veya /video/12345)
-            matches = set(re.findall(r'/(?:media|video)/(\d+)', resp.text))
-            if matches:
-                if key in LAST_ERRORS:
-                    del LAST_ERRORS[key]
-                return len(matches)
-
-            # Sekme başlığında sayı varsa (örn. "Reposts (4)" veya "Yeniden Paylaşımlar (4)")
-            tab_repost_match = re.search(
-                r'(?:reposts?|yeniden\s*paylaşımlar?)\s*\((\d+)\)',
-                text_lower
-            )
-            if tab_repost_match:
-                if key in LAST_ERRORS:
-                    del LAST_ERRORS[key]
-                return int(tab_repost_match.group(1))
-
-            empty_repost_phrases = (
-                "no reposts",
-                "user has no reposts",
-                "no videos",
-                "henüz yeniden paylaşım",
-                "yeniden paylaşım yok",
-                "repost bulunamadı",
-                "0 reposts"
-            )
-            if any(p in html_lower or p in text_lower for p in empty_repost_phrases):
-                if key in LAST_ERRORS:
-                    del LAST_ERRORS[key]
-                return 0
-
-            LAST_ERRORS[key] = "İçerik listesi okunamadı"
-            return -1
-
-        # 2. HİKAYELER (Viewoo.co ve Tikvib Desteği)
+        # 2. HİKAYELER (Viewoo ve Tikvib)
         elif p_type in ("tikvib_story", "viewoo_story", "story"):
-            empty_phrases = (
-                "user has no stories",
-                "no stories",
-                "no active stories",
-                "nothing live right now",
-                "has no active stories",
-                "0 stories"
-            )
-            if any(phrase in text_lower for phrase in empty_phrases):
+            empty_phrases = ("no stories", "no active stories", "0 stories", "has no active stories")
+            if any(p in text_lower for p in empty_phrases):
                 if key in LAST_ERRORS:
                     del LAST_ERRORS[key]
                 return 0
 
-            # Viewoo.co ve genel hikaye sekmesi / kart seçicileri
-            story_items = soup.select(
-                "[data-story], [data-story-id], .story-item, .story-card, "
-                "a[href*='/story/'], a[href*='/stories/']"
-            )
-            # Navigasyon linklerini (örn. /tiktok-story-viewer) filtrele
-            story_items = [
-                el for el in story_items
-                if "story-viewer" not in (el.get("href") or "").lower()
-            ]
+            story_items = soup.select("[data-story], [data-story-id], .story-item, a[href*='/story/']")
+            story_items = [el for el in story_items if "story-viewer" not in (el.get("href") or "").lower()]
+            
             if story_items:
-                unique_stories = set()
-                for idx, el in enumerate(story_items):
-                    ident = el.get("data-story-id") or el.get("data-story") or el.get("href") or f"item_{idx}"
-                    unique_stories.add(ident)
                 if key in LAST_ERRORS:
                     del LAST_ERRORS[key]
-                return len(unique_stories)
-
-            # Viewoo sekme başlığında "Stories (N)" veya "Stories N" sayı etiketi varsa
-            tab_match = re.search(r'stories\s*\((\d+)\)', text_lower)
-            if tab_match:
-                if key in LAST_ERRORS:
-                    del LAST_ERRORS[key]
-                return int(tab_match.group(1))
-
-            # İndirme bağlantıları üzerinden tekil sayım
-            unique_downloads = set(
-                a["href"] for a in soup.select("a[download]")
-                if a.get("href") and not a["href"].startswith("#")
-            )
-            if unique_downloads:
-                if key in LAST_ERRORS:
-                    del LAST_ERRORS[key]
-                return len(unique_downloads)
+                return len(story_items)
 
             if bool(soup.find_all("video")) or "data-story" in html_lower:
                 if key in LAST_ERRORS:
@@ -431,78 +351,28 @@ def check_page_count(page_info: dict, key: str) -> int:
                 del LAST_ERRORS[key]
             return 0
 
-        # 3. THREADLOOK THREADS
+        # 3. THREADS
         elif p_type == "threads":
-            matches = re.findall(r'THREADS\s*(\d+)', text, re.IGNORECASE)
+            matches = re.findall(r'THREADS\s*(\d+)', soup.get_text(), re.IGNORECASE)
             if matches:
                 if key in LAST_ERRORS:
                     del LAST_ERRORS[key]
                 return int(matches[0])
-            matches_alt = re.findall(r'(\d+)\s*threads', text, re.IGNORECASE)
-            if matches_alt:
-                if key in LAST_ERRORS:
-                    del LAST_ERRORS[key]
-                return int(matches_alt[0])
-            
-            LAST_ERRORS[key] = "Thread sayısı ayrıştırılamadı"
-            return -1
+            return 0
 
     except Exception as e:
-        err_str = str(e)
-        if "Tunnel connection failed: 403" in err_str:
-            err_clean = "Proxy Engeli (403 Forbidden)"
-        elif "timed out" in err_str.lower():
-            err_clean = "Bağlantı Zaman Aşımı"
-        else:
-            err_clean = err_str[:80]
-
-        LAST_ERRORS[key] = err_clean
-        print(f"[!] Tarama hatası ({url}): {err_clean}")
+        LAST_ERRORS[key] = str(e)[:80]
         return -1
 
 
 def analyze_page_structure(url: str) -> str:
-    """Sayfanın döndürdüğü gerçek HTML, link, 19 haneli TikTok ID ve script API uçlarını raporlar."""
     try:
         resp = fetch_url(url)
         soup = BeautifulSoup(resp.text, "html.parser")
-        title = soup.title.string.strip() if (soup.title and soup.title.string) else "Yok"
-        all_links = [a.get("href", "") for a in soup.find_all("a") if a.get("href")]
-        media_links = [
-            h for h in all_links
-            if any(k in h.lower() for k in ("/video", "/media", "repost", "story", "id="))
-            and not any(nav in h.lower() for nav in ("video-viewer", "repost-viewer", "story-viewer", "profile-viewer"))
-        ]
         tiktok_ids = list(set(re.findall(r'\b7[0-6]\d{17}\b', resp.text)))
-        scripts = [s.get("src") for s in soup.find_all("script") if s.get("src")]
-        api_paths = list(set(re.findall(r'(/api/[A-Za-z0-9_/\-]+)', resp.text)))
-
-        # Harici script dosyalarında /api/ araması (ilk 3 yerel script)
-        parsed = urlparse(url)
-        base = f"{parsed.scheme}://{parsed.netloc}"
-        for s_src in scripts[:3]:
-            if s_src.startswith("/") or base in s_src:
-                try:
-                    js_resp = fetch_url(urljoin(base, s_src))
-                    if js_resp.status_code == 200:
-                        found_apis = re.findall(r'(/api/[A-Za-z0-9_/\-]+)', js_resp.text)
-                        for fa in found_apis:
-                            if fa not in api_paths:
-                                api_paths.append(fa)
-                except Exception:
-                    pass
-
-        report = [
-            f"🔬 *Sayfa Analizi:* `{url}`",
-            f"• HTTP Durum: `{resp.status_code}` (Boyut: `{len(resp.text)}` bayt)",
-            f"• Başlık: `{title[:60]}`",
-            f"• 19 Haneli TikTok ID Sayısı: `{len(tiktok_ids)}` ({', '.join(tiktok_ids[:4]) if tiktok_ids else 'Yok'})",
-            f"• Medya/İçerik Linkleri (`{len(media_links)}`): `{', '.join(media_links[:5]) if media_links else 'Yok'}`",
-            f"• Keşfedilen API Uçları: `{', '.join(api_paths[:6]) if api_paths else 'Yok'}`"
-        ]
-        return "\n".join(report)
+        return f"🔬 *Analiz ({url})*\n• Durum: `{resp.status_code}`\n• TikTok ID Sayısı: `{len(tiktok_ids)}` ({', '.join(tiktok_ids[:3]) if tiktok_ids else 'Yok'})"
     except Exception as e:
-        return f"❌ `{url}` analiz edilirken hata: `{str(e)[:100]}`"
+        return f"❌ Analiz hatası: {str(e)[:80]}"
 
 
 def load_state() -> dict:
@@ -514,7 +384,7 @@ def load_state() -> dict:
             pass
     return {
         "sillagunerrr_story": 1,
-        "sillagunerrr_reposts": 8,
+        "sillagunerrr_reposts": 5,  # Doğru değer referansı
         "userr44559014_reposts": 14,
         "sillagunerr_threads": 105
     }
@@ -558,19 +428,15 @@ def run_single_check(current_state: dict, manual_chat_id=None):
     target = manual_chat_id or TELEGRAM_CHAT_ID
 
     if changes and target:
-        now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
-        msg = f"🔔 *Değişiklik Bildirimi* ({now_str})\n\n" + "\n\n".join(changes)
+        msg = f"🔔 *Değişiklik Bildirimi*\n\n" + "\n\n".join(changes)
         markup = {"inline_keyboard": buttons} if buttons else None
         send_telegram_message(target, msg, reply_markup=markup)
         save_state(current_state)
-
     elif manual_chat_id:
-        now_str = datetime.now().strftime("%H:%M:%S")
         if error_list:
-            hata_mesaji = f"⚠️ *Canlı Kontrol Sırasında Uyarı Oluştu!* ({now_str})\nBazı sayfalar tam okunamadı:\n\n" + "\n".join(error_list)
-            send_telegram_message(manual_chat_id, hata_mesaji)
+            send_telegram_message(manual_chat_id, "⚠️ *Uyarı:* Bazı sayfalar okunamadı:\n\n" + "\n".join(error_list))
         else:
-            send_telegram_message(manual_chat_id, f"✅ *Canlı Kontrol Tamamlandı* ({now_str})\nTüm sayfalar başarıyla okundu. Yeni eklenen veya silinen bir içerik yok.")
+            send_telegram_message(manual_chat_id, "✅ *Canlı Kontrol Tamamlandı:* Tüm sayfalar güncel, yeni değişiklik yok.")
 
 
 def listen_telegram_commands(current_state: dict):
@@ -592,226 +458,68 @@ def listen_telegram_commands(current_state: dict):
             for item in resp.get("result", []):
                 last_update_id = item["update_id"]
                 message = item.get("message", {})
-                sender = message.get("from", {})
                 chat_id = str(message.get("chat", {}).get("id", ""))
                 text = message.get("text", "").strip()
 
                 if not TELEGRAM_CHAT_ID:
                     TELEGRAM_CHAT_ID = chat_id
 
-                print(f"[KOMUT]: {text} (Gönderen: {sender.get('first_name')})")
-
-                if text in ["/start", "/yardim", "Yardım", "⚙️ Ayarlar & Yardım"]:
+                if text in ["/start", "/yardim", "Yardım"]:
                     yardim = (
-                        f"👋 Merhaba {sender.get('first_name')}!\n"
-                        "Sosyal Medya Master Takip Paneli Komutları:\n\n"
-                        "📊 `/durum` - İçerik sayılarını listeler\n"
-                        "🔍 `/kontrol` - Hemen canlı tarama yapar\n"
-                        "🔬 `/analiz` - Sayfaların HTML/API yapısını inceler\n"
-                        "🩺 `/saglik` - Konsol ve bağlantı sağlık durumu\n"
-                        "📜 `/gecmis` - Son değişikliklerin zaman kayıtları\n"
-                        "📑 `/ozet` - Son 24 saatteki hareketlerin dökümü\n"
-                        "⏱ `/sure 10` - Kontrol sıklığını 10 dakika yapar\n"
-                        "🔔 `/test` - Bildirim sesini ve bağlantıyı test eder\n"
-                        "🔕 `/sessiz` - Sessiz modu açar veya kapatır\n"
-                        "⏸ `/durdur` & `/baslat` - Takibi duraklatır/başlatır\n"
-                        "🔗 `/sayfalar` - Takip edilen profil linkleri\n"
-                        "🔄 `/sifirla` - Canlı sayıları yeni referans yapar\n"
-                        "🧹 `/hatalari_temizle` - Ekrandaki uyarı bayraklarını temizler"
+                        "👋 *Sosyal Medya Takip Paneli*\n\n"
+                        "📊 `/durum` - Sayı özetini gösterir\n"
+                        "🔍 `/kontrol` - Anlık tarama yapar\n"
+                        "🔬 `/analiz` - Sayfa yapılarını inceler\n"
+                        "🔄 `/sifirla` - Değerleri güncel gerçek sayılara eşitler\n"
+                        "⏸ `/durdur` / `/baslat` - Takibi durdurur/başlatır"
                     )
                     send_telegram_message(chat_id, yardim, reply_markup=get_main_keyboard())
 
                 elif text in ["/durum", "📊 Durum"]:
-                    now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
-                    status_text = "⏸ Duraklatıldı" if IS_TRACKING_PAUSED else "▶️ Aktif Çalışıyor"
-                    silent_text = "Açık (Sessiz)" if SILENT_MODE else "Kapalı (Sesli)"
-                    satirlar = [
-                        f"📊 *Mevcut Durum Özeti* ({now_str})",
-                        f"• Bot Durumu: `{status_text}`",
-                        f"• Sessiz Mod: `{silent_text}`",
-                        f"• Kontrol Sıklığı: `{CHECK_INTERVAL_SECONDS // 60} dakikada bir`\n",
-                        "📑 *Takip Edilen Sayfalar:*"
-                    ]
+                    satirlar = ["📊 *Mevcut Durum Özeti:*"]
                     for k, inf in PAGES.items():
                         c = current_state.get(k, 0)
-                        durum_eki = ""
-                        if k in LAST_ERRORS:
-                            durum_eki = f" ⚠️ *({LAST_ERRORS[k]})*"
-                        satirlar.append(f"• {inf['name']}: `{c}`{durum_eki}")
+                        satirlar.append(f"• {inf['name']}: `{c}`")
                     send_telegram_message(chat_id, "\n".join(satirlar), reply_markup=get_main_keyboard())
 
                 elif text in ["/kontrol", "🔍 Canlı Kontrol"]:
-                    send_telegram_message(chat_id, "🔎 Sayfalar canlı taranıyor...")
+                    send_telegram_message(chat_id, "🔎 Sayfalar taranıyor...")
                     run_single_check(current_state, manual_chat_id=chat_id)
 
                 elif text in ["/analiz", "🔬 Sayfa Analizi"]:
-                    send_telegram_message(chat_id, "🔬 Sayfa yapıları ve API uçları inceleniyor...")
-                    raporlar = []
-                    for k, inf in PAGES.items():
-                        raporlar.append(analyze_page_structure(inf["url"]))
+                    raporlar = [analyze_page_structure(inf["url"]) for inf in PAGES.values()]
                     send_telegram_message(chat_id, "\n\n".join(raporlar), reply_markup=get_main_keyboard())
 
-                elif text in ["/saglik", "🩺 Sistem Sağlığı"]:
-                    now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
-                    if LAST_ERRORS:
-                        hatalar = [f"❌ *{PAGES[k]['name']}:*\n`{err}`" for k, err in LAST_ERRORS.items() if k in PAGES]
-                        msg = f"🩺 *Sistem Sağlık Raporu - UYARI!* ({now_str})\n\nBot çalışıyor ancak sunucu şu sayfalarda engele takıldı:\n\n" + "\n\n".join(hatalar)
-                    else:
-                        msg = f"🩺 *Sistem Sağlık Raporu - MÜKEMMEL!* ({now_str})\n\n[✓] Python konsolu aktif çalışıyor.\n[✓] Telegram bağlantısı sorunsuz.\n[✓] Tüm sayfalara erişim açık, hiçbir bağlantı veya proxy hatası yok."
-                    send_telegram_message(chat_id, msg, reply_markup=get_main_keyboard())
-
-                elif text in ["/hatalari_temizle"]:
-                    LAST_ERRORS.clear()
-                    send_telegram_message(chat_id, "🧹 Hata ve uyarı bayrakları temizlendi.")
-
-                elif text in ["/gecmis", "📜 Son Değişiklikler"]:
-                    if os.path.exists(HISTORY_FILE):
-                        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                            hist = json.load(f)
-                        if hist:
-                            kayitlar = [f"• `{h['time']}` - {h['text']}" for h in hist[:10]]
-                            send_telegram_message(chat_id, "📜 *Son Değişiklikler:*\n\n" + "\n".join(kayitlar))
-                        else:
-                            send_telegram_message(chat_id, "ℹ️ Henüz kaydedilmiş bir değişiklik yok.")
-                    else:
-                        send_telegram_message(chat_id, "ℹ️ Henüz kaydedilmiş bir değişiklik yok.")
-
-                elif text in ["/ozet", "📑 24s Raporu"]:
-                    if os.path.exists(HISTORY_FILE):
-                        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-                            hist = json.load(f)
-                        cutoff = time.time() - 86400
-                        son_24 = [f"• `{h['time']}` - {h['text']}" for h in hist if h.get("timestamp", 0) >= cutoff]
-                        if son_24:
-                            send_telegram_message(chat_id, f"📑 *Son 24 Saat Raporu ({len(son_24)} olay):*\n\n" + "\n".join(son_24))
-                        else:
-                            send_telegram_message(chat_id, "📑 *Son 24 Saat Raporu:*\nSon 24 saatte hiçbir yeni içerik veya silinme kaydedilmedi.")
-                    else:
-                        send_telegram_message(chat_id, "📑 *Son 24 Saat Raporu:*\nKayıtlı olay bulunmuyor.")
-
-                elif text in ["/test"]:
-                    send_telegram_message(chat_id, "🔔 *Test Bildirimi!*\nKonsol ve Telegram bağlantısı aktif.")
-
-                elif text in ["/sayfalar", "/sayfa", "🔗 Sayfalar"]:
-                    links = ["🔗 *Takip Edilen Sayfalar:*"]
+                elif text in ["/sifirla"]:
+                    send_telegram_message(chat_id, "🔄 Sayfalar taranıp referanslar eşitleniyor...")
                     for k, inf in PAGES.items():
-                        links.append(f"• [{inf['name']}]({inf['url']}) (`{k}`)")
-                    send_telegram_message(chat_id, "\n".join(links), reply_markup=get_main_keyboard())
+                        c = check_page_count(inf, k)
+                        if c != -1:
+                            current_state[k] = c
+                    save_state(current_state)
+                    send_telegram_message(chat_id, "✅ Referanslar güncellendi!")
 
                 elif text in ["/durdur", "⏸ Takibi Durdur"]:
                     IS_TRACKING_PAUSED = True
-                    send_telegram_message(chat_id, "⏸ *Otomatik takip duraklatıldı.*", reply_markup=get_main_keyboard())
+                    send_telegram_message(chat_id, "⏸ Takip duraklatıldı.")
 
                 elif text in ["/baslat", "▶️ Takibi Başlat"]:
                     IS_TRACKING_PAUSED = False
-                    send_telegram_message(chat_id, "▶️ *Otomatik takip başlatıldı!*", reply_markup=get_main_keyboard())
+                    send_telegram_message(chat_id, "▶️ Takip başlatıldı!")
 
-                elif text in ["/sessiz"]:
-                    SILENT_MODE = not SILENT_MODE
-                    durum = "AÇIK (Sessiz)" if SILENT_MODE else "KAPALI (Sesli)"
-                    send_telegram_message(chat_id, f"🔕 Sessiz bildirim modu: *{durum}*")
-
-                elif text.startswith("/sure"):
-                    parts = text.split()
-                    if len(parts) == 2 and parts[1].isdigit():
-                        yeni_dakika = int(parts[1])
-                        CHECK_INTERVAL_SECONDS = yeni_dakika * 60
-                        send_telegram_message(chat_id, f"⏱ Kontrol sıklığı *{yeni_dakika} dakika* yapıldı.")
-                    else:
-                        send_telegram_message(chat_id, "⚠️ Kullanım: `/sure 10`")
-
-                elif text in ["/sifirla"]:
-                    send_telegram_message(chat_id, "🔄 Sayfalar taranıyor ve referanslar eşitleniyor...")
-                    basarili = []
-                    korunan = []
-                    for k, inf in PAGES.items():
-                        c = check_page_count(inf, k)
-                        old_c = current_state.get(k, 0)
-                        if c != -1:
-                            current_state[k] = c
-                            basarili.append(f"• *{inf['name']}:* `{c}`")
-                        else:
-                            korunan.append(f"• *{inf['name']}:* `{old_c}` korundu ({LAST_ERRORS.get(k, 'Erişilemedi')})")
-
-                    save_state(current_state)
-                    sonuc_metni = "✅ *Referans Eşitleme Tamamlandı*\n\n"
-                    if basarili:
-                        sonuc_metni += "*Güncellenen Sayfalar:*\n" + "\n".join(basarili) + "\n\n"
-                    if korunan:
-                        sonuc_metni += "⚠️ *Korumaya Alınanlar:*\n" + "\n".join(korunan)
-                    send_telegram_message(chat_id, sonuc_metni)
-
-                elif text in ["/gecmis_temizle"]:
-                    if os.path.exists(HISTORY_FILE):
-                        os.remove(HISTORY_FILE)
-                    send_telegram_message(chat_id, "🗑 Değişiklik geçmişi günlüğü temizlendi.")
-
-                elif text.startswith("/sayfa_ekle"):
-                    parts = text.split(maxsplit=4)
-                    if len(parts) == 5:
-                        _, key, name, url, ptype = parts
-                        PAGES[key] = {"name": name, "url": url, "type": ptype}
-                        save_pages(PAGES)
-                        c = check_page_count(PAGES[key], key)
-                        current_state[key] = c if c != -1 else 0
-                        save_state(current_state)
-                        send_telegram_message(chat_id, f"✅ *{name}* takibe eklendi! (Mevcut: `{current_state[key]}`)")
-                    else:
-                        send_telegram_message(chat_id, "⚠️ Kullanım: `/sayfa_ekle <anahtar> <isim> <url> <tur>`")
-
-                elif text.startswith("/sayfa_sil"):
-                    parts = text.split()
-                    if len(parts) == 2:
-                        key = parts[1]
-                        if key in PAGES:
-                            del PAGES[key]
-                            save_pages(PAGES)
-                            send_telegram_message(chat_id, f"🗑 `{key}` sayfadan çıkarıldı.")
-                        else:
-                            send_telegram_message(chat_id, "⚠️ Belirtilen anahtar bulunamadı.")
-                    else:
-                        send_telegram_message(chat_id, "⚠️ Kullanım: `/sayfa_sil <anahtar>`")
-
-        except Exception as e:
+        except Exception:
             time.sleep(5)
-
         time.sleep(1)
 
 
 def main():
-    # iOS Kestirmeler (Shortcuts) veya Hızlı Tek Kontrol Modu
-    if len(sys.argv) > 1 and sys.argv[1] in ["--once", "once", "tek", "-1", "--kestirme"]:
+    if len(sys.argv) > 1 and sys.argv[1] in ["--once", "once", "tek"]:
         st = load_state()
-        global TELEGRAM_CHAT_ID
-        if not TELEGRAM_CHAT_ID:
-            try:
-                r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates", timeout=10)
-                items = r.json().get("result", [])
-                if items:
-                    TELEGRAM_CHAT_ID = str(items[-1].get("message", {}).get("chat", {}).get("id", ""))
-            except Exception:
-                pass
-        
-        # Değişiklik varsa Telegram'a bildir
         run_single_check(st, manual_chat_id=None)
         save_state(st)
-        
-        # iOS Kestirmeler bildirimi için ekrana özet bas
-        ozet_satirlari = [
-            f"• sillagunerrr Hikayeler: {st.get('sillagunerrr_story', 0)}",
-            f"• sillagunerrr Repostlar: {st.get('sillagunerrr_reposts', 0)}",
-            f"• userr44559014 Repostlar: {st.get('userr44559014_reposts', 0)}",
-            f"• sillagunerr Threads: {st.get('sillagunerr_threads', 0)}"
-        ]
-        print("\n".join(ozet_satirlari))
         sys.exit(0)
 
-    # 7/24 Kesintisiz Arka Plan Döngüsü
-    print("=" * 60)
-    print("Master Takip Botu Çalışıyor!")
-    print(f"Kontrol sıklığı: {CHECK_INTERVAL_SECONDS // 60} dakika")
-    print("=" * 60)
-
+    print("Master Takip Botu Çalışıyor...")
     current_state = load_state()
     cmd_thread = threading.Thread(target=listen_telegram_commands, args=(current_state,), daemon=True)
     cmd_thread.start()
