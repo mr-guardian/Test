@@ -96,7 +96,6 @@ def send_telegram_message(text, reply_markup=None):
   payload = {
       "chat_id": TELEGRAM_CHAT_ID,
       "text": text,
-      "parse_mode": "Markdown",
       "disable_notification": SILENT_MODE,
   }
   if reply_markup:
@@ -216,15 +215,13 @@ def run_check():
 
     if count != old_val:
       fark = count - old_val
-      changes.append(
-          f"• *{info['name']}*: `{old_val}` ➔ `{count}` ({fark:+d})"
-      )
+      changes.append(f"• {info['name']}: {old_val} ➔ {count} ({fark:+d})")
       current_state[key] = count
 
   save_state(current_state)
 
   if changes:
-    msg = "🔔 *İçerik Değişikliği Algılandı!*\n\n" + "\n".join(changes)
+    msg = "🔔 İçerik Değişikliği Algılandı!\n\n" + "\n".join(changes)
     send_telegram_message(msg, reply_markup=get_inline_keyboard())
 
 
@@ -235,7 +232,7 @@ def handle_callback(callback_data, chat_id):
 
   if callback_data == "btn_durum":
     current_state = load_state()
-    lines = ["📑 *Takip Edilen Sayfalar:*\n"]
+    lines = ["📑 Takip Edilen Sayfalar:\n"]
     for key, info in PAGES.items():
       val = current_state.get(key, info.get("default_val", 0))
       lines.append(f"• {info['name']}: {val}")
@@ -249,28 +246,28 @@ def handle_callback(callback_data, chat_id):
     )
 
   elif callback_data == "btn_sayfalar":
-    links = ["🔗 *Takip Edilen Sayfalar:*"]
+    links = ["🔗 Takip Edilen Sayfalar:"]
     for k, inf in PAGES.items():
-      links.append(f"• [{inf['name']}]({inf['url']})")
+      links.append(f"• {inf['name']}: {inf['url']}")
     send_telegram_message("\n".join(links), reply_markup=get_inline_keyboard())
 
   elif callback_data == "btn_durdur":
     IS_TRACKING_PAUSED = True
     send_telegram_message(
-        "⏸ *Otomatik takip duraklatıldı.*", reply_markup=get_inline_keyboard()
+        "⏸ Otomatik takip duraklatıldı.", reply_markup=get_inline_keyboard()
     )
 
   elif callback_data == "btn_baslat":
     IS_TRACKING_PAUSED = False
     send_telegram_message(
-        "▶️ *Otomatik takip başlatıldı!*", reply_markup=get_inline_keyboard()
+        "▶️ Otomatik takip başlatıldı!", reply_markup=get_inline_keyboard()
     )
 
   elif callback_data == "btn_sessiz":
     SILENT_MODE = not SILENT_MODE
     durum = "AÇIK (Sessiz)" if SILENT_MODE else "KAPALI (Sesli)"
     send_telegram_message(
-        f"🔕 Sessiz mod: *{durum}*", reply_markup=get_inline_keyboard()
+        f"🔕 Sessiz mod: {durum}", reply_markup=get_inline_keyboard()
     )
 
 
@@ -284,7 +281,7 @@ def handle_message(text, chat_id):
 
   if "durum" in text_clean or text_clean == "/durum":
     current_state = load_state()
-    lines = ["📑 *Takip Edilen Sayfalar:*\n"]
+    lines = ["📑 Takip Edilen Sayfalar:\n"]
     for key, info in PAGES.items():
       val = current_state.get(key, info.get("default_val", 0))
       lines.append(f"• {info['name']}: {val}")
@@ -293,8 +290,7 @@ def handle_message(text, chat_id):
 
   if text_clean in ["/start", "/yardim", "anasayfa"]:
     send_telegram_message(
-        "👋 Bot aktif! Yönetmek için aşağıdaki butonları"
-        " kullanabilirsin:",
+        "👋 Bot aktif! Yönetmek için aşağıdaki butonları kullanabilirsin:",
         reply_markup=get_inline_keyboard(),
     )
 
@@ -368,7 +364,7 @@ def main():
   t.start()
 
   send_telegram_message(
-      "🚀 *Bot Başlatıldı!* Kontrol paneli:", reply_markup=get_inline_keyboard()
+      "🚀 Bot Başlatıldı! Kontrol paneli:", reply_markup=get_inline_keyboard()
   )
 
   while True:
