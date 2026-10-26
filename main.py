@@ -22,7 +22,7 @@ except Exception:
 TELEGRAM_BOT_TOKEN = "8902458393:AAFbMG-7nAuIFnBdWsBw5xilDiUCetSkSEg"
 TELEGRAM_CHAT_ID = "6009524525"
 
-CHECK_INTERVAL_SECONDS = 900
+CHECK_INTERVAL_SECONDS = 900  # 15 dakikada bir kontrol
 STATE_FILE = "tracker_state.json"
 
 PAGES = {
@@ -32,12 +32,12 @@ PAGES = {
         "type": "story",
     },
     "sillagunerrr_reposts": {
-        "url": "https://tikwm.com/api/user/posts?unique_id=sillagunerrr&count=35",
+        "url": "sillagunerrr",
         "name": "sillagunerrr Repostlar",
         "type": "api_reposts",
     },
     "userr44559014_reposts": {
-        "url": "https://tikwm.com/api/user/posts?unique_id=userr44559014&count=35",
+        "url": "userr44559014",
         "name": "userr44559014 Repostlar",
         "type": "api_reposts",
     },
@@ -72,34 +72,29 @@ def send_telegram_message(text):
     print(f"[!] Gönderim hatası: {e}")
 
 
-def fetch_url(url):
-  try:
-    if "tikwm.com" in url or "threadlook.com" in url:
-      return requests.get(url, headers=HEADERS, timeout=25)
-    if IS_CLOUDSCRAPER:
-      return HTTP_CLIENT.get(url, timeout=25)
-    return requests.get(url, headers=HEADERS, timeout=25)
-  except Exception:
-    return None
-
-
 def check_page_count(page_info):
-  url = page_info["url"]
+  url_or_user = page_info["url"]
   p_type = page_info["type"]
   try:
-    resp = fetch_url(url)
-    if not resp or resp.status_code != 200:
-      return -1
-
-    # 1. API Üzerinden Repost Sayımı (Kesin Çözüm)
+    # 1. API Üzerinden Repost Sayımı (POST isteği ile hatasız çekim)
     if p_type == "api_reposts":
-      try:
+      api_url = "https://tikwm.com/api/user/posts"
+      payload = {"unique_id": url_or_user, "count": 35}
+      resp = requests.post(api_url, data=payload, headers=HEADERS, timeout=15)
+      if resp.status_code == 200:
         data = resp.json()
         if data.get("code") == 0:
           videos = data.get("data", {}).get("videos", [])
           return len(videos)
-      except Exception:
-        pass
+      return 0
+
+    # Diğer siteler için standart GET
+    if IS_CLOUDSCRAPER:
+      resp = HTTP_CLIENT.get(url_or_user, timeout=25)
+    else:
+      resp = requests.get(url_or_user, headers=HEADERS, timeout=25)
+
+    if not resp or resp.status_code != 200:
       return 0
 
     html_text = resp.text
@@ -149,7 +144,7 @@ def check_page_count(page_info):
 
     return 0
   except Exception:
-    return -1
+    return 0
 
 
 def load_state():
@@ -173,9 +168,6 @@ def run_check():
 
   for key, info in PAGES.items():
     count = check_page_count(info)
-    if count == -1:
-      continue
-
     old_count = current_state.get(key, count)
     if current_state.get(key) is None:
       current_state[key] = count
@@ -218,8 +210,7 @@ def listen_telegram():
           lines = ["📑 *Takip Edilen Sayfalar:*\n"]
           for key, info in PAGES.items():
             val = check_page_count(info)
-            if val != -1:
-              current_state[key] = val
+            current_state[key] = val
             c = current_state.get(key, 0)
             lines.append(f"• *{info['name']}*: `{c}`")
           save_state(current_state)
