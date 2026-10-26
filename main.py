@@ -102,7 +102,8 @@ def send_telegram_message(text, reply_markup=None):
   if reply_markup:
     payload["reply_markup"] = reply_markup
   try:
-    requests.post(url, json=payload, timeout=8)
+    resp = requests.post(url, json=payload, timeout=10)
+    print(f"[TELEGRAM YANIT API]: {resp.status_code} - {resp.text}")
   except Exception as e:
     print(f"[!] Gönderim hatası: {e}")
 
@@ -230,14 +231,14 @@ def run_check():
 def handle_callback(callback_data, chat_id):
   global CHECK_INTERVAL_SECONDS, IS_TRACKING_PAUSED, SILENT_MODE
 
-  print(f"[INLINE BUTON TIKLANDI]: {callback_data}")
+  print(f"[INLINE BUTON İŞLENİYOR]: {callback_data}")
 
   if callback_data == "btn_durum":
     current_state = load_state()
     lines = ["📑 *Takip Edilen Sayfalar:*\n"]
     for key, info in PAGES.items():
       val = current_state.get(key, info.get("default_val", 0))
-      lines.append(f"• {info['name']}: `{val}`")
+      lines.append(f"• {info['name']}: {val}")
     send_telegram_message("\n".join(lines), reply_markup=get_inline_keyboard())
 
   elif callback_data == "btn_kontrol":
@@ -280,14 +281,13 @@ def handle_message(text, chat_id):
     return
 
   text_clean = text.strip().lower()
-  print(f"[MESAJ ALINDI]: {text_clean}")
 
   if "durum" in text_clean or text_clean == "/durum":
     current_state = load_state()
     lines = ["📑 *Takip Edilen Sayfalar:*\n"]
     for key, info in PAGES.items():
       val = current_state.get(key, info.get("default_val", 0))
-      lines.append(f"• {info['name']}: `{val}`")
+      lines.append(f"• {info['name']}: {val}")
     send_telegram_message("\n".join(lines), reply_markup=get_inline_keyboard())
     return
 
@@ -323,21 +323,18 @@ def listen_telegram():
         for item in resp.get("result", []):
           last_update_id = item["update_id"]
 
-          # 1. Normal Mesajlar / Komutlar
           msg = item.get("message", {})
           text = msg.get("text", "").strip()
           chat_id = str(msg.get("chat", {}).get("id", ""))
           if text and chat_id:
             handle_message(text, chat_id)
 
-          # 2. Inline Buton Tıklamaları (Callback Query)
           callback_query = item.get("callback_query")
           if callback_query:
             cb_data = callback_query.get("data")
             cb_chat_id = str(
                 callback_query.get("message", {}).get("chat", {}).get("id", "")
             )
-            # Tiklandiginda yuklenen animasyonu durdurmak için callback'i onaylayalım
             cb_id = callback_query.get("id")
             try:
               requests.post(
@@ -370,7 +367,6 @@ def main():
   t = threading.Thread(target=listen_telegram, daemon=True)
   t.start()
 
-  # Bot açılışında kontrol paneli mesajı gönderelim
   send_telegram_message(
       "🚀 *Bot Başlatıldı!* Kontrol paneli:", reply_markup=get_inline_keyboard()
   )
