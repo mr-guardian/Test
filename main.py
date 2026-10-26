@@ -101,8 +101,7 @@ def send_telegram_message(text, reply_markup=None):
   if reply_markup:
     payload["reply_markup"] = reply_markup
   try:
-    resp = requests.post(url, json=payload, timeout=10)
-    print(f"[TELEGRAM YANIT API]: {resp.status_code} - {resp.text}")
+    requests.post(url, json=payload, timeout=10)
   except Exception as e:
     print(f"[!] Gönderim hatası: {e}")
 
@@ -131,13 +130,40 @@ def check_page_count(page_info, current_state_val=0):
     text = soup.get_text()
     text_lower = text.lower()
 
+    # Viewoo Sayfasındaki Görsel Repost Sayacını Doğrudan Okuma
     if p_type == "viewoo_reposts":
-      tiktok_ids = set(re.findall(r"\b7[0-6]\d{17}\b", html_text))
-      if tiktok_ids:
-        return len(tiktok_ids)
-      if current_state_val > 0:
-        return current_state_val
-      return default_val
+      # 1. Repost sekmesi butonundaki veya başlığındaki sayacı arayalım (Örn: "Reposts 5" veya "Reposts (5)")
+      match_tab = re.search(
+          r"reposts?\s*[\(\:]?\s*(\d+)", text_lower, re.IGNORECASE
+      )
+      if match_tab:
+        return int(match_tab.group(1))
+
+      # 2. Sayfadaki istatistik rozetlerini (badge, count, stat) kontrol et
+      stat_elements = soup.select(
+          ".count, .badge, .stats, span[class*='count'], div[class*='count'],"
+          " .tab-count"
+      )
+      for el in stat_elements:
+        num_str = el.get_text().strip()
+        if num_str.isdigit() and int(num_str) < 1000:
+          return int(num_str)
+
+      # 3. Eğer görsel sayaç bulunamazsa akıllı kart/video sayımı yapalım
+      cards = soup.select(
+          "div.posts__video-item, .video-card, .post-card, a[href*='/video/']"
+      )
+      if cards:
+        valid_cards = [
+            c
+            for c in cards
+            if "viewer" not in c.get("href", "").lower()
+            if hasattr(c, "get")
+        ]
+        if valid_cards:
+          return len(set(str(c) for c in valid_cards))
+
+      return current_state_val if current_state_val > 0 else default_val
 
     elif p_type == "story":
       empty_phrases = (
@@ -227,8 +253,6 @@ def run_check():
 
 def handle_callback(callback_data, chat_id):
   global CHECK_INTERVAL_SECONDS, IS_TRACKING_PAUSED, SILENT_MODE
-
-  print(f"[INLINE BUTON İŞLENİYOR]: {callback_data}")
 
   if callback_data == "btn_durum":
     current_state = load_state()
