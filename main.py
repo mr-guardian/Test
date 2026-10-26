@@ -29,37 +29,42 @@ PAGES = {
     "sillagunerrr_story": {
         "url": "https://viewoo.co/u/sillagunerrr",
         "name": "sillagunerrr Hikayeler",
-        "type": "story"
+        "type": "story",
+        "default_val": 0
     },
     "sillagunerrr_reposts": {
-        "url": "https://viewoo.co/u/sillagunerrr?tab=reposts",
+        "url": "https://www.tiktok.com/@sillagunerrr",
         "name": "sillagunerrr Repostlar",
-        "type": "viewoo_reposts",
+        "type": "tiktok_direct",
+        "username": "sillagunerrr",
         "default_val": 5
     },
     "userr44559014_reposts": {
-        "url": "https://viewoo.co/u/userr44559014?tab=reposts",
+        "url": "https://www.tiktok.com/@userr44559014",
         "name": "userr44559014 Repostlar",
-        "type": "viewoo_reposts",
+        "type": "tiktok_direct",
+        "username": "userr44559014",
         "default_val": 1
     },
     "emin_htp_reposts": {
-        "url": "https://viewoo.co/u/emin_htp?tab=reposts",
+        "url": "https://www.tiktok.com/@emin_htp",
         "name": "emin_htp Repostlar",
-        "type": "viewoo_reposts",
-        "default_val": 0
+        "type": "tiktok_direct",
+        "username": "emin_htp",
+        "default_val": 11
     },
     "sillagunerr_threads": {
         "url": "https://threadlook.com/profile/sillagunerr",
         "name": "sillagunerr Threads",
-        "type": "threads"
+        "type": "threads",
+        "default_val": 0
     }
 }
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Language": "en-US,en;q=0.9,tr;q=0.8",
 }
 
 
@@ -109,65 +114,80 @@ def fetch_url(url, custom_headers=None):
         return None
 
 
-def fetch_repost_count_dynamic(username):
-    """Viewoo API ve sayfa akışından repost sayısını dener."""
-    api_url = f"https://viewoo.co/api/resolve?target=https://www.tiktok.com/@{username}"
-    resp = fetch_url(api_url, {"User-Agent": HEADERS["User-Agent"], "Accept": "application/json"})
-    if resp and resp.status_code == 200:
+def fetch_tiktok_direct_reposts(username):
+    """TikTok profilinin gömülü JSON verisinden repost/video verilerini doğrudan çeker."""
+    url = f"https://www.tiktok.com/@{username}"
+    resp = fetch_url(url)
+    if not resp or resp.status_code != 200:
+        return None
+
+    html = resp.text
+
+    # 1. __UNIVERSAL_DATA_FOR_REHYDRATION__ ayrıştırma
+    m_univ = re.search(r'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>', html, re.DOTALL)
+    if m_univ:
         try:
-            data = resp.json()
-            matches = set(re.findall(r'\b7\d{18}\b', json.dumps(data)))
-            if len(matches) > 0:
-                return len(matches)
+            data = json.loads(m_univ.group(1))
+            default_scope = data.get("__DEFAULT_SCOPE__", {})
+            user_detail = default_scope.get("webapp.user-detail", {})
+            stats = user_detail.get("userInfo", {}).get("stats", {})
+            
+            # Doğrudan sayaç alanı varsa
+            for k in ["repostCount", "repost_count", "diggCount", "videoCount"]:
+                if k in stats:
+                    val = stats[k]
+                    if isinstance(val, int) and val > 0:
+                        return val
+
+            # Item modülü içindeki liste sayısı
+            item_list = default_scope.get("webapp.video-detail", {}).get("itemList", [])
+            if len(item_list) > 0:
+                return len(item_list)
         except Exception:
             pass
 
-    rsc_url = f"https://viewoo.co/u/{username}?tab=reposts"
-    rsc_resp = fetch_url(rsc_url, {
-        "User-Agent": HEADERS["User-Agent"],
-        "RSC": "1",
-        "Next-Url": f"/u/{username}?tab=reposts"
-    })
-    if rsc_resp and rsc_resp.status_code == 200:
-        ids = set(re.findall(r'\b7\d{18}\b', rsc_resp.text))
-        if len(ids) > 0:
-            return len(ids)
+    # 2. SIGI_STATE bloğu ayrıştırma
+    m_sigi = re.search(r'<script id="SIGI_STATE"[^>]*>(.*?)</script>', html, re.DOTALL)
+    if m_sigi:
+        try:
+            data = json.loads(m_sigi.group(1))
+            item_module = data.get("ItemModule", {})
+            if item_module:
+                return len(item_module)
+        except Exception:
+            pass
+
+    # 3. Sayfa içinde yer alan video ID'leri (19 haneli 7 ile başlayan kalıplar)
+    ids = set(re.findall(r'"id"\s*:\s*"([7]\d{18})"', html))
+    if ids:
+        return len(ids)
 
     return None
 
 
 def check_page_count(page_info, current_state_val=0):
-    url = page_info["url"]
     p_type = page_info["type"]
     default_val = page_info.get("default_val", 0)
 
     try:
-        if p_type == "viewoo_reposts":
-            m = re.search(r'/u/([^/?]+)', url)
-            if m:
-                username = m.group(1)
-                dyn_count = fetch_repost_count_dynamic(username)
-                if dyn_count is not None and dyn_count > 0:
-                    return dyn_count
+        # Doğrudan TikTok Entegrasyonu
+        if p_type == "tiktok_direct":
+            username = page_info.get("username")
+            count = fetch_tiktok_direct_reposts(username)
+            if count is not None and count > 0:
+                return count
+            return current_state_val if current_state_val > 0 else default_val
 
-            resp = fetch_url(url)
-            if resp and resp.status_code == 200:
-                ids = set(re.findall(r'\b7\d{18}\b', resp.text))
-                if len(ids) > 0:
-                    return len(ids)
+        # Viewoo Hikaye Takibi
+        elif p_type == "story":
+            resp = fetch_url(page_info["url"])
+            if not resp or resp.status_code != 200:
+                return current_state_val if current_state_val > 0 else default_val
 
-            return current_state_val if current_state_val is not None else default_val
+            html_text = resp.text
+            soup = BeautifulSoup(html_text, "html.parser")
+            text_lower = soup.get_text().lower()
 
-        resp = fetch_url(url)
-        if not resp or resp.status_code != 200:
-            return current_state_val if current_state_val is not None else default_val
-
-        html_text = resp.text
-        soup = BeautifulSoup(html_text, "html.parser")
-        text = soup.get_text()
-        text_lower = text.lower()
-
-        if p_type == "story":
             empty_phrases = ("user has no stories", "no stories", "no active stories", "hikaye yok", "0 stories")
             if any(p in text_lower for p in empty_phrases):
                 return 0
@@ -181,7 +201,13 @@ def check_page_count(page_info, current_state_val=0):
                 return 1
             return 0
 
+        # Threads Takibi
         elif p_type == "threads":
+            resp = fetch_url(page_info["url"])
+            if not resp or resp.status_code != 200:
+                return current_state_val if current_state_val > 0 else default_val
+
+            text = BeautifulSoup(resp.text, "html.parser").get_text()
             matches = re.findall(r'THREADS\s*(\d+)', text, re.IGNORECASE)
             if matches:
                 return int(matches[0])
@@ -193,9 +219,9 @@ def check_page_count(page_info, current_state_val=0):
             if numbers:
                 return max(numbers)
 
-        return current_state_val if current_state_val is not None else default_val
+        return current_state_val if current_state_val > 0 else default_val
     except Exception:
-        return current_state_val if current_state_val is not None else default_val
+        return current_state_val if current_state_val > 0 else default_val
 
 
 def load_state():
@@ -253,7 +279,7 @@ def handle_callback(callback_data, chat_id):
         send_telegram_message("\n".join(lines), reply_markup=get_inline_keyboard())
 
     elif callback_data == "btn_kontrol":
-        send_telegram_message("🔎 Sayfalar taranıyor...")
+        send_telegram_message("🔎 Sayfalar taranıyor (TikTok doğrudan sorgulanıyor)...")
         run_check()
         send_telegram_message("✅ Canlı kontrol tamamlandı.", reply_markup=get_inline_keyboard())
 
@@ -347,16 +373,12 @@ def listen_telegram():
 
 
 def main():
-    print("Master Takip Botu Başlatıldı...")
+    print("TikTok Doğrudan Kaynaklı Master Takip Botu Başlatıldı...")
 
-    # Başlangıç değerlerini eşitle (emin_htp_reposts = 0 olarak sabitlenir)
     current_state = load_state()
     for key, info in PAGES.items():
         if key not in current_state:
             current_state[key] = info.get("default_val", 0)
-    
-    # emin_htp tabanını doğrudan 0'a çekelim
-    current_state["emin_htp_reposts"] = 0
     save_state(current_state)
 
     t = threading.Thread(target=listen_telegram, daemon=True)
