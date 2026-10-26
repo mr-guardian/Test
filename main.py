@@ -94,3 +94,8 @@ def check_sites_logic(bot_instance):
     res = requests.get(url, headers=headers, timeout=15)
     if res.status_code == 200:
       soup = BeautifulSoup(res.text, "html.parser")
+      page_text = soup.get_text()
+      if last_states["tik_2"] is None:
+        last_states["tik_2"] = page_text
+      elif last_states["tik_2"] != page_text:
+        last_
