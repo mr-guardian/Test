@@ -22,7 +22,7 @@ except Exception:
 TELEGRAM_BOT_TOKEN = "8902458393:AAFbMG-7nAuIFnBdWsBw5xilDiUCetSkSEg"
 TELEGRAM_CHAT_ID = "6009524525"
 
-CHECK_INTERVAL_SECONDS = 900  # Varsayılan 15 dakika
+CHECK_INTERVAL_SECONDS = 900  # 15 dakika
 IS_TRACKING_PAUSED = False
 SILENT_MODE = False
 
@@ -97,16 +97,6 @@ def send_telegram_message(text, reply_markup=None):
     requests.post(url, json=payload, timeout=10)
   except Exception as e:
     print(f"[!] Gönderim hatası: {e}")
-
-
-def clear_webhook():
-  """Telegram'da takılı kalmış olabilecek webhook bağlantısını temizler"""
-  try:
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=True"
-    requests.get(url, timeout=10)
-    print("[*] Webhook temizlendi, polling aktifleşti.")
-  except Exception as e:
-    print(f"[!] Webhook temizleme hatası: {e}")
 
 
 def fetch_url(url):
@@ -229,98 +219,99 @@ def run_check():
     send_telegram_message(msg, reply_markup=get_main_keyboard())
 
 
-def listen_telegram():
+def handle_message(text, chat_id):
   global CHECK_INTERVAL_SECONDS, IS_TRACKING_PAUSED, SILENT_MODE
-  clear_webhook()  # Başlangıçta webhook'u temizle
+
+  if str(chat_id) != str(TELEGRAM_CHAT_ID):
+    return
+
+  print(f"[KOMUT İŞLENİYOR]: {text}")
+
+  if text in ["/start", "/yardim"]:
+    send_telegram_message(
+        "👋 Bot aktif! Aşağıdaki butonları kullanarak işlem yapabilirsin.",
+        reply_markup=get_main_keyboard(),
+    )
+
+  elif text in ["/durum", "📊 Durum"]:
+    current_state = load_state()
+    lines = ["📑 *Takip Edilen Sayfalar:*\n"]
+    for key, info in PAGES.items():
+      old_val = current_state.get(key, 0)
+      val = check_page_count(info, current_state_val=old_val)
+      current_state[key] = val
+      lines.append(f"• {info['name']}: `{val}`")
+    save_state(current_state)
+    send_telegram_message("\n".join(lines), reply_markup=get_main_keyboard())
+
+  elif text in ["/kontrol", "🔍 Canlı Kontrol"]:
+    send_telegram_message("🔎 Sayfalar taranıyor...")
+    run_check()
+    send_telegram_message(
+        "✅ Canlı kontrol tamamlandı.", reply_markup=get_main_keyboard()
+    )
+
+  elif text in ["/sayfalar", "🔗 Sayfalar"]:
+    links = ["🔗 *Takip Edilen Sayfalar:*"]
+    for k, inf in PAGES.items():
+      links.append(f"• [{inf['name']}]({inf['url']})")
+    send_telegram_message("\n".join(links), reply_markup=get_main_keyboard())
+
+  elif text in ["/durdur", "⏸ Takibi Durdur"]:
+    IS_TRACKING_PAUSED = True
+    send_telegram_message(
+        "⏸ *Otomatik takip duraklatıldı.*", reply_markup=get_main_keyboard()
+    )
+
+  elif text in ["/baslat", "▶️ Takibi Başlat"]:
+    IS_TRACKING_PAUSED = False
+    send_telegram_message(
+        "▶️ *Otomatik takip başlatıldı!*", reply_markup=get_main_keyboard()
+    )
+
+  elif text in ["/sessiz", "🔕 Sessiz Mod"]:
+    SILENT_MODE = not SILENT_MODE
+    durum = "AÇIK (Sessiz)" if SILENT_MODE else "KAPALI (Sesli)"
+    send_telegram_message(
+        f"🔕 Sessiz mod: *{durum}*", reply_markup=get_main_keyboard()
+    )
+
+
+def listen_telegram():
+  # Webhook kalıntısını temizle ve bekleyen güncellemeleri sıfırla
+  try:
+    requests.get(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=True",
+        timeout=10,
+    )
+  except Exception:
+    pass
+
   last_update_id = 0
-  print("[*] Telegram komut dinleyici aktif.")
+  print("[*] Telegram komut dinleyici hazır.")
 
   while True:
     try:
       url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-      r = requests.get(
+      resp = requests.get(
           url,
-          params={"offset": last_update_id + 1, "timeout": 10, "limit": 10},
-          timeout=15,
-      )
-      resp = r.json()
+          params={"offset": last_update_id + 1, "timeout": 20, "limit": 10},
+          timeout=25,
+      ).json()
 
-      if not resp.get("ok"):
-        time.sleep(3)
-        continue
-
-      for item in resp.get("result", []):
-        last_update_id = item["update_id"]
-        msg = item.get("message", {})
-        text = msg.get("text", "").strip()
-        chat_id = str(msg.get("chat", {}).get("id", ""))
-
-        if not chat_id or chat_id != TELEGRAM_CHAT_ID:
-          continue
-
-        print(f"[KOMUT ALINDI]: {text}")
-
-        if text in ["/start", "/yardim"]:
-          send_telegram_message(
-              "👋 Bot aktif! Aşağıdaki butonları kullanarak işlem"
-              " yapabilirsin.",
-              reply_markup=get_main_keyboard(),
-          )
-
-        elif text in ["/durum", "📊 Durum"]:
-          current_state = load_state()
-          lines = ["📑 *Takip Edilen Sayfalar:*\n"]
-          for key, info in PAGES.items():
-            old_val = current_state.get(key, 0)
-            val = check_page_count(info, current_state_val=old_val)
-            current_state[key] = val
-            lines.append(f"• {info['name']}: `{val}`")
-          save_state(current_state)
-          send_telegram_message(
-              "\n".join(lines), reply_markup=get_main_keyboard()
-          )
-
-        elif text in ["/kontrol", "🔍 Canlı Kontrol"]:
-          send_telegram_message("🔎 Sayfalar taranıyor...")
-          run_check()
-          send_telegram_message(
-              "✅ Canlı kontrol tamamlandı.", reply_markup=get_main_keyboard()
-          )
-
-        elif text in ["/sayfalar", "🔗 Sayfalar"]:
-          links = ["🔗 *Takip Edilen Sayfalar:*"]
-          for k, inf in PAGES.items():
-            links.append(f"• [{inf['name']}]({inf['url']})")
-          send_telegram_message(
-              "\n".join(links), reply_markup=get_main_keyboard()
-          )
-
-        elif text in ["/durdur", "⏸ Takibi Durdur"]:
-          IS_TRACKING_PAUSED = True
-          send_telegram_message(
-              "⏸ *Otomatik takip duraklatıldı.*",
-              reply_markup=get_main_keyboard(),
-          )
-
-        elif text in ["/baslat", "▶️ Takibi Başlat"]:
-          IS_TRACKING_PAUSED = False
-          send_telegram_message(
-              "▶️ *Otomatik takip başlatıldı!*",
-              reply_markup=get_main_keyboard(),
-          )
-
-        elif text in ["/sessiz", "🔕 Sessiz Mod"]:
-          SILENT_MODE = not SILENT_MODE
-          durum = "AÇIK (Sessiz)" if SILENT_MODE else "KAPALI (Sesli)"
-          send_telegram_message(
-              f"🔕 Sessiz mod: *{durum}*", reply_markup=get_main_keyboard()
-          )
-
+      if resp.get("ok"):
+        for item in resp.get("result", []):
+          last_update_id = item["update_id"]
+          msg = item.get("message", {})
+          text = msg.get("text", "").strip()
+          chat_id = str(msg.get("chat", {}).get("id", ""))
+          if text and chat_id:
+            handle_message(text, chat_id)
     except Exception as e:
-      print(f"[!] Telegram dinleme hatası: {e}")
-      time.sleep(3)
+      print(f"[!] Dinleme döngüsü hatası: {e}")
+      time.sleep(5)
 
-    time.sleep(1)
+    time.sleep(0.5)
 
 
 def main():
