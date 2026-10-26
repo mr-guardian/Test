@@ -198,10 +198,11 @@ def run_check():
   changes = []
 
   for key, info in PAGES.items():
-    old_val = current_state.get(key, 0)
+    old_val = current_state.get(key, -1)
     count = check_page_count(info, current_state_val=old_val)
 
-    if current_state.get(key) is None:
+    # Eğer daha önce kaydedilmemişse (ilk açılış), sessizce kaydet ve bildirim atma
+    if old_val == -1:
       current_state[key] = count
       continue
 
@@ -225,16 +226,16 @@ def handle_message(text, chat_id):
   if str(chat_id) != str(TELEGRAM_CHAT_ID):
     return
 
-  print(f"[KOMUT ALINDI]: {text}")
+  text_clean = text.strip()
+  print(f"[KOMUT ALINDI]: {text_clean}")
 
-  if text in ["/start", "/yardim"]:
+  if text_clean in ["/start", "/yardim", "Anasayfa"]:
     send_telegram_message(
         "👋 Bot aktif! Aşağıdaki butonları kullanarak işlem yapabilirsin.",
         reply_markup=get_main_keyboard(),
     )
 
-  elif text in ["/durum", "📊 Durum"]:
-    # Durum komutu için siteleri anlık zorlamak yerine hafızadaki kayıtları hızlıca dönüyoruz
+  elif "durum" in text_clean.lower() or text_clean in ["/durum", "📊 Durum"]:
     current_state = load_state()
     lines = ["📑 *Takip Edilen Sayfalar:*\n"]
     for key, info in PAGES.items():
@@ -242,32 +243,41 @@ def handle_message(text, chat_id):
       lines.append(f"• {info['name']}: `{val}`")
     send_telegram_message("\n".join(lines), reply_markup=get_main_keyboard())
 
-  elif text in ["/kontrol", "🔍 Canlı Kontrol"]:
+  elif "kontrol" in text_clean.lower() or text_clean in [
+      "/kontrol",
+      "🔍 Canlı Kontrol",
+  ]:
     send_telegram_message("🔎 Sayfalar taranıyor...")
     run_check()
     send_telegram_message(
         "✅ Canlı kontrol tamamlandı.", reply_markup=get_main_keyboard()
     )
 
-  elif text in ["/sayfalar", "🔗 Sayfalar"]:
+  elif "sayfa" in text_clean.lower() or text_clean in ["/sayfalar", "🔗 Sayfalar"]:
     links = ["🔗 *Takip Edilen Sayfalar:*"]
     for k, inf in PAGES.items():
       links.append(f"• [{inf['name']}]({inf['url']})")
     send_telegram_message("\n".join(links), reply_markup=get_main_keyboard())
 
-  elif text in ["/durdur", "⏸ Takibi Durdur"]:
+  elif "durdur" in text_clean.lower() or text_clean in [
+      "/durdur",
+      "⏸ Takibi Durdur",
+  ]:
     IS_TRACKING_PAUSED = True
     send_telegram_message(
         "⏸ *Otomatik takip duraklatıldı.*", reply_markup=get_main_keyboard()
     )
 
-  elif text in ["/baslat", "▶️ Takibi Başlat"]:
+  elif "başlat" in text_clean.lower() or text_clean in [
+      "/baslat",
+      "▶️ Takibi Başlat",
+  ]:
     IS_TRACKING_PAUSED = False
     send_telegram_message(
         "▶️ *Otomatik takip başlatıldı!*", reply_markup=get_main_keyboard()
     )
 
-  elif text in ["/sessiz", "🔕 Sessiz Mod"]:
+  elif "sessiz" in text_clean.lower() or text_clean in ["/sessiz", "🔕 Sessiz Mod"]:
     SILENT_MODE = not SILENT_MODE
     durum = "AÇIK (Sessiz)" if SILENT_MODE else "KAPALI (Sesli)"
     send_telegram_message(
@@ -312,14 +322,16 @@ def listen_telegram():
 
 def main():
   print("Master Takip Botu Başlatıldı...")
-  t = threading.Thread(target=listen_telegram, daemon=True)
-  t.start()
 
+  # İlk açılışta state dosyası yoksa veya boşsa, başlangıç değerleriyle doldurup bildirim gitmesini önleyelim
   current_state = load_state()
   for key, info in PAGES.items():
     if key not in current_state:
       current_state[key] = info.get("default_val", 0)
   save_state(current_state)
+
+  t = threading.Thread(target=listen_telegram, daemon=True)
+  t.start()
 
   while True:
     run_check()
