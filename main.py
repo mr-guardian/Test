@@ -25,7 +25,7 @@ TELEGRAM_CHAT_ID = "6009524525"
 CHECK_INTERVAL_SECONDS = 900  # 15 dakikada bir kontrol
 STATE_FILE = "tracker_state.json"
 
-# Tamamen Viewoo ve Threadlook odaklı yapılandırılmış adresler
+# Repostlar için direkt ?tab=reposts sekmesi eklendi
 PAGES = {
     "sillagunerrr_story": {
         "url": "https://viewoo.co/u/sillagunerrr",
@@ -33,12 +33,12 @@ PAGES = {
         "type": "story",
     },
     "sillagunerrr_reposts": {
-        "url": "https://viewoo.co/u/sillagunerrr",
+        "url": "https://viewoo.co/u/sillagunerrr?tab=reposts",
         "name": "sillagunerrr Repostlar",
         "type": "viewoo_reposts",
     },
     "userr44559014_reposts": {
-        "url": "https://viewoo.co/u/userr44559014",
+        "url": "https://viewoo.co/u/userr44559014?tab=reposts",
         "name": "userr44559014 Repostlar",
         "type": "viewoo_reposts",
     },
@@ -97,17 +97,22 @@ def check_page_count(page_info):
     text = soup.get_text()
     text_lower = text.lower()
 
-    # 1. Viewoo Repost Sayımı (Viewoo profil sayfasındaki gönderi/repost elemanları)
+    # 1. Viewoo Repost Sekmesi Sayımı
     if p_type == "viewoo_reposts":
-      # Sayfada listelenen video/kart ögelerini bul
+      # Sayfada listelenen video kartlarını veya medya ögelerini bulalım
       items = soup.select(
           "div.posts__video-item, [data-video-id], .video-card, .post-item,"
-          " a[href*='/video/'], div.grid > div"
+          " a[href*='/video/'], div.grid > div, .card"
       )
       if items:
-        # Tekilleştirme yaparak doğru sayıyı bulalım
         unique_items = set(str(item) for item in items)
         return len(unique_items)
+
+      # Alternatif olarak sayfa metninde veya sayaç badge'lerinde geçen rakamları kontrol et
+      numbers = [int(n) for n in re.findall(r"\b\d+\b", text) if int(n) < 50]
+      if numbers:
+        return numbers[0]
+
       return 0
 
     # 2. Hikaye Sayımı
