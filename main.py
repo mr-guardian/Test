@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Master Takip ve Yönetim Botu
-(Easycomment, Tikvib ve Threadlook Hibrit Destekli - Railway Uyumlu)
+(Easycomment Gelişmiş API/Next.js Ayrıştırıcı, Tikvib ve Threadlook Destekli - Railway Uyumlu)
 """
 
 import os
@@ -166,33 +166,45 @@ def add_history_entry(entry: str):
 
 
 def fetch_easycomment_count(username: str, page_url: str) -> int:
-    """Easycomment üzerinden repost sayısını hem HTML/Next.js hem de API ile çeker."""
-    # 1. Yöntem: Sayfa HTML ve JSON Hydration State Analizi
+    """Easycomment üzerinden repost sayısını Next.js verisi, regex ve dahili API'ler üzerinden çeker."""
+    # 1. Aşama: Sayfa Kaynak Kodunu ve Next.js Hydration Nesnelerini Tara
     try:
-        resp = HTTP_CLIENT.get(page_url, headers=HEADERS, timeout=20)
+        req_headers = HEADERS.copy()
+        req_headers.update({
+            "Referer": "https://easycomment.ai/",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "same-origin"
+        })
+        resp = HTTP_CLIENT.get(page_url, headers=req_headers, timeout=20)
+        
         if resp.status_code == 200:
             text = resp.text
-
-            # Next.js Data bloğu tespiti
             soup = BeautifulSoup(text, "html.parser")
+
+            # A) Next.js Script Bloğu (__NEXT_DATA__)
             next_data = soup.find("script", id="__NEXT_DATA__")
             if next_data and next_data.string:
                 try:
                     js_data = json.loads(next_data.string)
                     dumped = json.dumps(js_data)
-                    matches = re.findall(r'"repost(?:Count|s)?"\s*:\s*(\d+)', dumped, re.I)
+                    matches = re.findall(r'"(?:repostCount|repost_count|reposts?|repostTotal)"\s*:\s*(\d+)', dumped, re.I)
                     if matches:
                         return int(matches[0])
                 except Exception:
                     pass
 
-            # Sekme etiketindeki sayı: örn. Reposts (15) veya Reposts: 15
-            clean_text = soup.get_text()
-            tab_match = re.search(r'reposts?\s*\(?(\d+)\)?', clean_text, re.IGNORECASE)
+            # B) Sayfa İçi Genel JSON veya Script Verisi
+            script_matches = re.findall(r'"(?:repostCount|repost_count|reposts?)"\s*:\s*(\d+)', text, re.I)
+            if script_matches:
+                return int(script_matches[0])
+
+            # C) Sekme Başlığı Metni: "Reposts (15)" veya "Reposts 15"
+            tab_match = re.search(r'reposts?\s*\(?(\d+)\)?', soup.get_text(), re.IGNORECASE)
             if tab_match:
                 return int(tab_match.group(1))
 
-            # Doğrudan gömülü video bağlantıları
+            # D) Gömülü Video / Link Sayımı
             video_links = set(
                 a["href"] for a in soup.find_all("a", href=True)
                 if "/video/" in a["href"] or "tiktok.com/@" in a["href"]
@@ -200,21 +212,26 @@ def fetch_easycomment_count(username: str, page_url: str) -> int:
             if video_links:
                 return len(video_links)
 
-            if "no reposts" in text.lower() or "no videos" in text.lower():
+            if "no reposts" in text.lower() or "user has no reposts" in text.lower() or "no videos" in text.lower():
                 return 0
+
     except Exception:
         pass
 
-    # 2. Yöntem: Arka plan Dahili API Çağrısı
+    # 2. Aşama: Dahili API / Microservice Çağrıları
     api_candidates = [
         f"https://easycomment.ai/api/tiktok/user?username={username}&tab=reposts",
-        f"https://easycomment.ai/api/tiktok/posts?username={username}&type=repost",
-        f"https://easycomment.ai/api/user/info?username={username}"
+        f"https://easycomment.ai/api/tiktok/user/posts?username={username}&type=repost",
+        f"https://easycomment.ai/api/tiktok/user?username={username}",
+        f"https://easycomment.ai/api/trpc/user.getProfile?input=%7B%22username%22%3A%22{username}%22%7D"
     ]
     api_headers = HEADERS.copy()
     api_headers.update({
         "Accept": "application/json, text/plain, */*",
-        "Referer": page_url
+        "Referer": page_url,
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin"
     })
 
     for api_url in api_candidates:
@@ -222,10 +239,10 @@ def fetch_easycomment_count(username: str, page_url: str) -> int:
             r = HTTP_CLIENT.get(api_url, headers=api_headers, timeout=12)
             if r.status_code == 200:
                 data = r.json()
-                dumped = json.dumps(data)
-                m = re.findall(r'"(?:total|count|reposts?)"\s*:\s*(\d+)', dumped, re.I)
-                if m:
-                    return int(m[0])
+                raw_str = json.dumps(data)
+                found = re.findall(r'"(?:total|count|itemCount|reposts?)"\s*:\s*(\d+)', raw_str, re.I)
+                if found:
+                    return int(found[0])
         except Exception:
             continue
 
@@ -438,10 +455,9 @@ def listen_telegram_commands(current_state: dict):
                     yardim = (
                         "👋 <b>Master Takip Botu Aktif!</b>\n\n"
                         "📊 <code>/durum</code> - Güncel sayıları gösterir\n"
-                        "🔍 <code>/kontrol</code> - Hemen canlı tarama yapar\n"
+                        "🔍 <code>/kontrol</code> - Canlı tarama yapar\n"
                         "🩺 <code>/saglik</code> - Bağlantı ve sistem durumu\n"
                         "📜 <code>/gecmis</code> - Son değişiklik kayıtları\n"
-                        "📑 <code>/ozet</code> - Son 24 saatlik döküm\n"
                         "⏱ <code>/sure 10</code> - Kontrol aralığı (dk)\n"
                         "🔄 <code>/sifirla</code> - Canlı sayıları yeni referans yapar\n"
                         "⏸ <code>/durdur</code> & ▶️ <code>/baslat</code>"
