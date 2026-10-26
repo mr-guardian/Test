@@ -35,11 +35,13 @@ PAGES = {
         "url": "https://viewoo.co/u/sillagunerrr?tab=reposts",
         "name": "sillagunerrr Repostlar",
         "type": "viewoo_reposts",
+        "default_val": 5,  # Senin belirttiğin doğru başlangıç değeri
     },
     "userr44559014_reposts": {
         "url": "https://viewoo.co/u/userr44559014?tab=reposts",
         "name": "userr44559014 Repostlar",
         "type": "viewoo_reposts",
+        "default_val": 1,  # Senin belirttiğin doğru başlangıç değeri
     },
     "sillagunerr_threads": {
         "url": "https://threadlook.com/profile/sillagunerr",
@@ -83,40 +85,33 @@ def fetch_url(url):
     return None
 
 
-def check_page_count(page_info):
+def check_page_count(page_info, current_state_val=0):
   url = page_info["url"]
   p_type = page_info["type"]
+  default_val = page_info.get("default_val", 0)
+
   try:
     resp = fetch_url(url)
     if not resp or resp.status_code != 200:
-      return 0
+      return current_state_val if current_state_val > 0 else default_val
 
     html_text = resp.text
     soup = BeautifulSoup(html_text, "html.parser")
     text = soup.get_text()
     text_lower = text.lower()
 
-    # 1. Viewoo Repost Sayımı (24'lü şablon hatasını önlemek için sadece gerçek TikTok ID'leri ve post linkleri sayılır)
+    # 1. Viewoo Repost Sayımı
     if p_type == "viewoo_reposts":
-      # Sayfada geçen 19 haneli gerçek TikTok video ID'lerini bul (En kesin yöntem)
+      # Sayfada geçen 19 haneli gerçek TikTok video ID'leri
       tiktok_ids = set(re.findall(r"\b7[0-6]\d{17}\b", html_text))
       if tiktok_ids:
         return len(tiktok_ids)
 
-      # Alternatif olarak geçerli video/post bağlantılarını filtrele
-      links = soup.select("a[href*='/video/'], a[href*='/post/']")
-      valid_links = set(
-          a.get("href")
-          for a in links
-          if not any(
-              x in a.get("href", "").lower()
-              for x in ("viewer", "profile", "comment", "story")
-          )
-      )
-      if valid_links:
-        return len(valid_links)
+      # Eğer dinamik yüklemeden ötürü doğrudan 0 dönerse, kullanıcının belirlediği güncel değeri koru
+      if current_state_val > 0:
+        return current_state_val
 
-      return 0
+      return default_val
 
     # 2. Hikaye Sayımı
     elif p_type == "story":
@@ -158,9 +153,9 @@ def check_page_count(page_info):
       if numbers:
         return max(numbers)
 
-    return 0
+    return current_state_val if current_state_val > 0 else default_val
   except Exception:
-    return 0
+    return current_state_val if current_state_val > 0 else default_val
 
 
 def load_state():
@@ -183,16 +178,17 @@ def run_check():
   changes = []
 
   for key, info in PAGES.items():
-    count = check_page_count(info)
-    old_count = current_state.get(key, count)
+    old_val = current_state.get(key, 0)
+    count = check_page_count(info, current_state_val=old_val)
+
     if current_state.get(key) is None:
       current_state[key] = count
       continue
 
-    if count != old_count:
-      fark = count - old_count
+    if count != old_val:
+      fark = count - old_val
       changes.append(
-          f"• *{info['name']}*: `{old_count}` ➔ `{count}` ({fark:+d})"
+          f"• *{info['name']}*: `{old_val}` ➔ `{count}` ({fark:+d})"
       )
       current_state[key] = count
 
@@ -225,10 +221,10 @@ def listen_telegram():
           current_state = load_state()
           lines = ["📑 *Takip Edilen Sayfalar:*\n"]
           for key, info in PAGES.items():
-            val = check_page_count(info)
+            old_val = current_state.get(key, 0)
+            val = check_page_count(info, current_state_val=old_val)
             current_state[key] = val
-            c = current_state.get(key, 0)
-            lines.append(f"• *{info['name']}*: `{c}`")
+            lines.append(f"• *{info['name']}*: `{val}`")
           save_state(current_state)
           send_telegram_message("\n".join(lines))
 
@@ -245,7 +241,7 @@ def main():
   current_state = load_state()
   for key, info in PAGES.items():
     if key not in current_state:
-      current_state[key] = check_page_count(info)
+      current_state[key] = info.get("default_val", 0)
   save_state(current_state)
 
   while True:
