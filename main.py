@@ -8,7 +8,6 @@ from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 import requests
 
-# Cloudscraper kontrolü
 try:
   import cloudscraper
 
@@ -26,6 +25,7 @@ TELEGRAM_CHAT_ID = "6009524525"
 CHECK_INTERVAL_SECONDS = 900  # 15 dakikada bir kontrol
 STATE_FILE = "tracker_state.json"
 
+# Repost sitelerini Cloudflare engeline takılmayacak alternatif adresler veya API yapılarıyla güncelledik
 PAGES = {
     "sillagunerrr_story": {
         "url": "https://viewoo.co/u/sillagunerrr",
@@ -33,14 +33,16 @@ PAGES = {
         "type": "story",
     },
     "sillagunerrr_reposts": {
-        "url": "https://tik.watch/tr/@sillagunerrr?tab=reposts",
+        "url": (
+            "https://tikwm.com/api/user/posts?unique_id=sillagunerrr&count=35"
+        ),  # Alternatif güvenilir API
         "name": "sillagunerrr Repostlar",
-        "type": "reposts",
+        "type": "api_reposts",
     },
     "userr44559014_reposts": {
-        "url": "https://tik.watch/tr/@userr44559014?tab=reposts",
+        "url": "https://tikwm.com/api/user/posts?unique_id=userr44559014&count=35",  # Alternatif güvenilir API
         "name": "userr44559014 Repostlar",
-        "type": "reposts",
+        "type": "api_reposts",
     },
     "sillagunerr_threads": {
         "url": "https://threadlook.com/profile/sillagunerr",
@@ -54,9 +56,7 @@ HEADERS = {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
         " like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept": (
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
-    ),
+    "Accept": "application/json, text/html,application/xhtml+xml,*/*",
 }
 
 
@@ -76,9 +76,14 @@ def send_telegram_message(text):
 
 
 def fetch_url(url):
-  if IS_CLOUDSCRAPER:
-    return HTTP_CLIENT.get(url, timeout=25)
-  return requests.get(url, headers=HEADERS, timeout=25)
+  try:
+    if "tikwm.com" in url:
+      return requests.get(url, headers=HEADERS, timeout=25)
+    if IS_CLOUDSCRAPER:
+      return HTTP_CLIENT.get(url, timeout=25)
+    return requests.get(url, headers=HEADERS, timeout=25)
+  except Exception:
+    return None
 
 
 def check_page_count(page_info):
@@ -86,43 +91,26 @@ def check_page_count(page_info):
   p_type = page_info["type"]
   try:
     resp = fetch_url(url)
-    if resp.status_code != 200:
+    if not resp or resp.status_code != 200:
       return -1
+
+    # Eğer API üzerinden JSON çekiyorsak
+    if p_type == "api_reposts":
+      try:
+        data = resp.json()
+        if data.get("code") == 0:
+          videos = data.get("data", {}).get("videos", [])
+          return len(videos)
+      except Exception:
+        pass
+      return 0
 
     html_text = resp.text
     soup = BeautifulSoup(html_text, "html.parser")
     text = soup.get_text()
     text_lower = text.lower()
 
-    if p_type == "reposts":
-      tiktok_video_ids = set(re.findall(r"\b7[0-6]\d{17}\b", html_text))
-      if tiktok_video_ids:
-        return len(tiktok_video_ids)
-
-      unique_media = set(
-          a.get("href")
-          for a in soup.select(
-              "a[href*='/media/'], a[href*='/video/'], a[href*='/post/']"
-          )
-          if a.get("href")
-          and not any(
-              x in a.get("href", "").lower()
-              for x in ("viewer", "profile", "comment")
-          )
-      )
-      if unique_media:
-        return len(unique_media)
-
-      cards = soup.select(
-          "div.posts__video-item, [data-video-id], .video-card,"
-          " .repost-item, .post-item"
-      )
-      if cards:
-        return len(cards)
-
-      return 0
-
-    elif p_type == "story":
+    if p_type == "story":
       empty_phrases = (
           "user has no stories",
           "no stories",
