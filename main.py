@@ -89,76 +89,99 @@ def check_page_count(page_info):
     if resp.status_code != 200:
       return -1
 
-    soup = BeautifulSoup(resp.text, "html.parser")
+    html_text = resp.text
+    soup = BeautifulSoup(html_text, "html.parser")
     text = soup.get_text()
     text_lower = text.lower()
 
-    # 1. Repost Sayımı
-    if p_type == "reposts":
-      tiktok_video_ids = set(re.findall(r"\b7[0-6]\d{17}\b", resp.text))
-      if len(tiktok_video_ids) > 1:
-        return len(tiktok_video_ids)
+    # 1. Repost Sayımı (Tik.watch özel geliştirilmiş ayrıştırıcı)
+  def check_page_count(page_info):
+    url = page_info["url"]
+    p_type = page_info["type"]
+    try:
+      resp = fetch_url(url)
+      if resp.status_code != 200:
+        return -1
 
-      unique_media = set(
-          a.get("href")
-          for a in soup.select("a[href*='/media/'], a[href*='/video/']")
-          if a.get("href")
-          and "video-viewer" not in a.get("href", "").lower()
-      )
-      if unique_media:
-        return len(unique_media)
+      html_text = resp.text
+      soup = BeautifulSoup(html_text, "html.parser")
+      text = soup.get_text()
+      text_lower = text.lower()
 
-      cards = soup.select(
-          "div.posts__video-item, [data-video-id], .video-card, .repost-item"
-      )
-      if cards:
-        return len(cards)
+      if p_type == "reposts":
+        # Sayfadaki tüm 19 haneli TikTok video ID'lerini bul (repostları yakalamak için en kesin yoldur)
+        tiktok_video_ids = set(re.findall(r"\b7[0-6]\d{17}\b", html_text))
+        if tiktok_video_ids:
+          return len(tiktok_video_ids)
 
-      return 0
+        # Alternatif olarak video veya medya linklerini say
+        unique_media = set(
+            a.get("href")
+            for a in soup.select(
+                "a[href*='/media/'], a[href*='/video/'], a[href*='/post/']"
+            )
+            if a.get("href")
+            and not any(
+                x in a.get("href", "").lower()
+                for x in ("viewer", "profile", "comment")
+            )
+        )
+        if unique_media:
+          return len(unique_media)
 
-    # 2. Hikaye Sayımı
-    elif p_type == "story":
-      empty_phrases = (
-          "user has no stories",
-          "no stories",
-          "no active stories",
-          "hikaye yok",
-          "0 stories",
-      )
-      if any(p in text_lower for p in empty_phrases):
+        # Fallback: Sayfadaki genel kart veya item yapıları
+        cards = soup.select(
+            "div.posts__video-item, [data-video-id], .video-card,"
+            " .repost-item, .post-item"
+        )
+        if cards:
+          return len(cards)
+
         return 0
 
-      story_items = soup.select(
-          "[data-story], [data-story-id], .story-item, a[href*='/story/']"
-      )
-      story_items = [
-          el
-          for el in story_items
-          if "story-viewer" not in (el.get("href") or "").lower()
-      ]
-      if story_items:
-        return len(set(str(el) for el in story_items))
+      # 2. Hikaye Sayımı
+      elif p_type == "story":
+        empty_phrases = (
+            "user has no stories",
+            "no stories",
+            "no active stories",
+            "hikaye yok",
+            "0 stories",
+        )
+        if any(p in text_lower for p in empty_phrases):
+          return 0
 
-      if bool(soup.find_all("video")) or "data-story" in resp.text.lower():
-        return 1
+        story_items = soup.select(
+            "[data-story], [data-story-id], .story-item, a[href*='/story/']"
+        )
+        story_items = [
+            el
+            for el in story_items
+            if "story-viewer" not in (el.get("href") or "").lower()
+        ]
+        if story_items:
+          return len(set(str(el) for el in story_items))
+
+        if bool(soup.find_all("video")) or "data-story" in html_text.lower():
+          return 1
+        return 0
+
+      # 3. Threads Sayımı (Threadlook)
+      elif p_type == "threads":
+        matches = re.findall(r"THREADS\s*(\d+)", text, re.IGNORECASE)
+        if matches:
+          return int(matches[0])
+        matches_alt = re.findall(r"(\d+)\s*threads", text, re.IGNORECASE)
+        if matches_alt:
+          return int(matches_alt[0])
+
+        numbers = [int(n) for n in re.findall(r"\b\d+\b", text) if len(n) <= 4]
+        if numbers:
+          return max(numbers)
+
       return 0
-
-    # 3. Threads Sayımı (Threadlook)
-    elif p_type == "threads":
-      matches = re.findall(r"THREADS\s*(\d+)", text, re.IGNORECASE)
-      if matches:
-        return int(matches[0])
-      matches_alt = re.findall(r"(\d+)\s*threads", text, re.IGNORECASE)
-      if matches_alt:
-        return int(matches_alt[0])
-
-      numbers = [int(n) for n in re.findall(r"\b\d+\b", text) if len(n) <= 4]
-      if numbers:
-        return max(numbers)
-
-    return 0
-  except Exception:
-    return -1
+    except Exception:
+      return -1
 
 
 def load_state():
@@ -192,7 +215,6 @@ def run_check():
 
     if count != old_count:
       fark = count - old_count
-      yon = "arttı" if fark > 0 else "azaldı"
       changes.append(
           f"• *{info['name']}*: `{old_count}` ➔ `{count}` ({fark:+d})"
       )
