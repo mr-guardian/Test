@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Master Takip ve Yönetim Botu
-(Easycomment, Tikvib ve Threadlook Destekli)
+(Easycomment, Tikvib ve Threadlook Destekli - Railway Uyumlu)
 """
 
 import os
@@ -27,8 +27,8 @@ except Exception:
 # ==========================================
 # 1. BİLDİRİM VE BOT AYARLARI
 # ==========================================
-TELEGRAM_BOT_TOKEN = "8902458393:AAFbMG-7nAuIFnBdWsBw5xilDiUCetSkSEg"
-TELEGRAM_CHAT_ID = ""  # İlk mesajınızla otomatik tanımlanır
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8902458393:AAFbMG-7nAuIFnBdWsBw5xilDiUCetSkSEg")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")  # İlk mesajınızla otomatik tanımlanır
 
 CHECK_INTERVAL_SECONDS = 900  # 15 dakika
 IS_TRACKING_PAUSED = False
@@ -104,7 +104,7 @@ PAGES = load_pages()
 
 
 def send_telegram_message(chat_id: str, text: str, reply_markup=None):
-    if not TELEGRAM_BOT_TOKEN:
+    if not TELEGRAM_BOT_TOKEN or not chat_id:
         return False
     
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -121,7 +121,7 @@ def send_telegram_message(chat_id: str, text: str, reply_markup=None):
         r = requests.post(url, json=payload, timeout=15)
         return r.json().get("ok", False)
     except Exception as e:
-        print(f"[!] Gönderim hatası: {e}")
+        print(f"[!] Telegram bildirim hatası: {e}")
         return False
 
 
@@ -179,14 +179,12 @@ def check_page_count(page_info: dict, key: str) -> int:
 
         # 1. EASYCOMMENT REPOSTLARI
         if p_type == "easycomment_reposts":
-            # Sekme başlığındaki repost sayısı: örn. "Reposts (12)" veya "Reposts 12"
             tab_match = re.search(r'reposts?\s*\(?(\d+)\)?', text, re.IGNORECASE)
             if tab_match:
                 if key in LAST_ERRORS:
                     del LAST_ERRORS[key]
                 return int(tab_match.group(1))
 
-            # Video/İçerik linkleri üzerinden tekil sayım
             unique_video_links = set(
                 a["href"] for a in soup.find_all("a", href=True)
                 if "/video/" in a["href"] or "tiktok.com/@" in a["href"]
@@ -196,7 +194,6 @@ def check_page_count(page_info: dict, key: str) -> int:
                     del LAST_ERRORS[key]
                 return len(unique_video_links)
 
-            # JSON hydration verisi gömülü ise
             state_match = re.search(r'"repost(?:Count|s)?"\s*:\s*(\d+)', resp.text, re.IGNORECASE)
             if state_match:
                 if key in LAST_ERRORS:
@@ -391,104 +388,44 @@ def listen_telegram_commands(current_state: dict):
 
                 print(f"[KOMUT]: {text} (Gönderen: {sender.get('first_name')})")
 
-                if text in ["/start", "/yardim", "Yardım"]:
+                # 1. Başlangıç & Yardım
+                if text in ["/start", "/yardim", "Yardım", "⚙️ Ayarlar & Yardım"]:
                     yardim = (
                         f"👋 Merhaba {sender.get('first_name')}!\n"
-                        "Master Takip Paneli Komutları:\n\n"
+                        "Sosyal Medya Master Takip Paneli Komutları:\n\n"
                         "📊 `/durum` - İçerik sayılarını listeler\n"
                         "🔍 `/kontrol` - Hemen canlı tarama yapar\n"
-                        "🩺 `/saglik` - Bağlantı ve tarama durum raporu\n"
-                        "📜 `/gecmis` - Son değişiklikler\n"
-                        "📑 `/ozet` - Son 24 saat raporu\n"
-                        "⏱ `/sure 10` - Kontrol sıklığı (dk)\n"
-                        "🔕 `/sessiz` - Sessiz mod aç/kapat\n"
-                        "⏸ `/durdur` & `/baslat` - Takibi durdur/başlat\n"
-                        "🔄 `/sifirla` - Canlı sayıları yeni referans yap"
+                        "🩺 `/saglik` - Konsol ve bağlantı sağlık durumu\n"
+                        "📜 `/gecmis` - Son değişikliklerin zaman kayıtları\n"
+                        "📑 `/ozet` - Son 24 saatteki hareketlerin dökümü\n"
+                        "⏱ `/sure 10` - Kontrol sıklığını 10 dakika yapar\n"
+                        "🔔 `/test` - Bildirim sesini ve bağlantıyı test eder\n"
+                        "🔕 `/sessiz` - Sessiz modu açar veya kapatır\n"
+                        "⏸ `/durdur` & `/baslat` - Takibi duraklatır/başlatır\n"
+                        "🔗 `/sayfalar` - Takip edilen profil linkleri\n"
+                        "🔄 `/sifirla` - Canlı sayıları yeni referans yapar\n"
+                        "🧹 `/hatalari_temizle` - Ekrandaki uyarı bayraklarını temizler\n"
+                        "➕ `/sayfa_ekle <anahtar> <isim> <url> <tur>`\n"
+                        "🗑 `/gecmis_temizle` - Geçmiş kayıtlarını sıfırlar"
                     )
                     send_telegram_message(chat_id, yardim, reply_markup=get_main_keyboard())
 
+                # 2. Durum Raporu
                 elif text in ["/durum", "📊 Durum"]:
                     now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
-                    status_text = "⏸ Duraklatıldı" if IS_TRACKING_PAUSED else "▶️ Aktif"
+                    status_text = "⏸ Duraklatıldı" if IS_TRACKING_PAUSED else "▶️ Aktif Çalışıyor"
+                    silent_text = "Açık (Sessiz)" if SILENT_MODE else "Kapalı (Sesli)"
                     satirlar = [
                         f"📊 *Mevcut Durum Özeti* ({now_str})",
                         f"• Bot Durumu: `{status_text}`",
-                        f"• Kontrol Sıklığı: `{CHECK_INTERVAL_SECONDS // 60} dk`\n",
+                        f"• Sessiz Mod: `{silent_text}`",
+                        f"• Kontrol Sıklığı: `{CHECK_INTERVAL_SECONDS // 60} dakikada bir`\n",
                         "📑 *Takip Edilen Sayfalar:*"
                     ]
                     for k, inf in PAGES.items():
                         c = current_state.get(k, 0)
-                        durum_eki = f" ⚠️ *({LAST_ERRORS[k]})*" if k in LAST_ERRORS else ""
+                        durum_eki = ""
+                        if k in LAST_ERRORS:
+                            durum_eki = f" ⚠️ *({LAST_ERRORS[k]})*"
                         satirlar.append(f"• {inf['name']}: `{c}`{durum_eki}")
-                    send_telegram_message(chat_id, "\n".join(satirlar), reply_markup=get_main_keyboard())
-
-                elif text in ["/kontrol", "🔍 Canlı Kontrol"]:
-                    send_telegram_message(chat_id, "🔎 Sayfalar canlı taranıyor...")
-                    run_single_check(current_state, manual_chat_id=chat_id)
-
-                elif text in ["/saglik", "🩺 Sistem Sağlığı"]:
-                    now_str = datetime.now().strftime("%d.%m.%Y %H:%M")
-                    if LAST_ERRORS:
-                        hatalar = [f"❌ *{PAGES[k]['name']}:*\n`{err}`" for k, err in LAST_ERRORS.items() if k in PAGES]
-                        msg = f"🩺 *Sistem Sağlık Uyarısı* ({now_str})\n\n" + "\n\n".join(hatalar)
-                    else:
-                        msg = f"🩺 *Sistem Sağlık Raporu - Mükemmel!* ({now_str})\nTüm sayfalara sorunsuz erişiliyor."
-                    send_telegram_message(chat_id, msg, reply_markup=get_main_keyboard())
-
-                elif text in ["/sifirla"]:
-                    send_telegram_message(chat_id, "🔄 Sayfalar taranıyor ve referanslar eşitleniyor...")
-                    basarili, korunan = [], []
-                    for k, inf in PAGES.items():
-                        c = check_page_count(inf, k)
-                        old_c = current_state.get(k, 0)
-                        if c != -1:
-                            current_state[k] = c
-                            basarili.append(f"• *{inf['name']}:* `{c}`")
-                        else:
-                            korunan.append(f"• *{inf['name']}:* `{old_c}` korundu ({LAST_ERRORS.get(k, 'Hata')})")
-
-                    save_state(current_state)
-                    sonuc = "✅ *Referans Eşitleme Tamamlandı*\n\n"
-                    if basarili:
-                        sonuc += "*Güncellenenler:*\n" + "\n".join(basarili) + "\n\n"
-                    if korunan:
-                        sonuc += "⚠️ *Korumaya Alınanlar:*\n" + "\n".join(korunan)
-                    send_telegram_message(chat_id, sonuc)
-
-                elif text in ["/durdur", "⏸ Takibi Durdur"]:
-                    IS_TRACKING_PAUSED = True
-                    send_telegram_message(chat_id, "⏸ *Otomatik takip duraklatıldı.*")
-
-                elif text in ["/baslat", "▶️ Takibi Başlat"]:
-                    IS_TRACKING_PAUSED = False
-                    send_telegram_message(chat_id, "▶️ *Otomatik takip başlatıldı!*")
-
-                elif text in ["/sayfalar", "🔗 Sayfalar"]:
-                    links = ["🔗 *Takip Edilen Sayfalar:*"]
-                    for k, inf in PAGES.items():
-                        links.append(f"• [{inf['name']}]({inf['url']})")
-                    send_telegram_message(chat_id, "\n".join(links))
-
-        except Exception:
-            time.sleep(5)
-
-        time.sleep(1)
-
-
-def main():
-    print("=" * 60)
-    print("Master Takip Botu Çalışıyor!")
-    print("=" * 60)
-
-    current_state = load_state()
-
-    cmd_thread = threading.Thread(target=listen_telegram_commands, args=(current_state,), daemon=True)
-    cmd_thread.start()
-
-    while True:
-        run_single_check(current_state, manual_chat_id=None)
-        time.sleep(CHECK_INTERVAL_SECONDS)
-
-
-if __name__ == "__main__":
-    
+                    send_telegram
