@@ -112,4 +112,61 @@ def check_sites_logic(bot_instance):
   try:
     url = "https://threadlook.com/profile/sillagunerr"
     res = requests.get(url, headers=headers, timeout=15)
-    if res.status_code == 2
+    if res.status_code == 200:
+      page_text = res.text
+      soup = BeautifulSoup(res.text, "html.parser")
+
+      # Sayfa içerisindeki sayısal değerleri bulmaya çalışalım (Örn: 119 veya benzeri)
+      # Sayfada geçen sayıları ayıklayarak güncel değeri bulabiliriz
+      numbers_found = re.findall(r"\b\d+\b", page_text)
+      current_value = numbers_found[0] if numbers_found else "Bilinmiyor"
+
+      if last_states["threadlook"] is None:
+        last_states["threadlook"] = page_text
+      elif last_states["threadlook"] != page_text:
+        last_states["threadlook"] = page_text
+        send_msg(
+            f"🔔 **Threadlook Güncellemesi!**\n{url}\n⚠️ **Değer değişti!** Yeni"
+            f" durum/sayı algılandı."
+        )
+  except Exception as e:
+    logger.error(f"Threadlook hata: {e}")
+
+
+async def cmd_kontrol(update: Update, context: ContextTypes.DEFAULT_TYPE):
+  await update.message.reply_text("🔍 Siteler kontrol ediliyor...")
+  check_sites_logic(context.bot)
+  await update.message.reply_text("✅ Kontrol tamamlandı!")
+
+
+async def cmd_durum(update: Update, context: ContextTypes.DEFAULT_TYPE):
+  # Günlük durum raporu çıkarırken mevcut hikaye/değer durumlarını özetleyelim
+  story_status = "Var" if last_states["viewoo"] else "Yok / Henüz taranmadı"
+  durum_metni = (
+      f"🤖 **Bot Durum Raporu**\n\n"
+      f"⏱️ **Son Kontrol:** `{last_check_time}`\n\n"
+      f"📡 **Takip Edilenler:**\n"
+      f"• **Viewoo Hikaye Durumu:** {story_status}\n"
+      f"• **Tik.watch (1. Profil):** Aktif Takipte\n"
+      f"• **Tik.watch (2. Profil):** Aktif Takipte\n"
+      f"• **Threadlook:** Aktif Takipte"
+  )
+  await update.message.reply_text(durum_metni, parse_mode="Markdown")
+
+
+def scheduled_job():
+  temp_bot = Bot(token=TOKEN)
+  check_sites_logic(temp_bot)
+
+
+if __name__ == "__main__":
+  scheduler = BackgroundScheduler()
+  scheduler.add_job(scheduled_job, "interval", minutes=10)
+  scheduler.start()
+
+  app = ApplicationBuilder().token(TOKEN).build()
+  app.add_handler(CommandHandler("kontrol", cmd_kontrol))
+  app.add_handler(CommandHandler("durum", cmd_durum))
+
+  logger.info("Gelişmiş Bot Aktif!")
+  app.run_polling()
