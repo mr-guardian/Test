@@ -1,4 +1,3 @@
-from datetime import datetime
 import json
 import os
 import re
@@ -67,6 +66,7 @@ HEADERS = {
     "Accept": (
         "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
     ),
+    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
 
@@ -109,10 +109,67 @@ def send_telegram_message(text, reply_markup=None):
 def fetch_url(url):
   try:
     if IS_CLOUDSCRAPER:
-      return HTTP_CLIENT.get(url, timeout=10)
-    return requests.get(url, headers=HEADERS, timeout=10)
+      return HTTP_CLIENT.get(url, timeout=12)
+    return requests.get(url, headers=HEADERS, timeout=12)
   except Exception:
     return None
+
+
+def extract_repost_count_from_html(html_text):
+  """Viewoo'nun HTML veya Next.js/Nuxt gömülü verilerinden gerçek repost sayısını çeker."""
+  try:
+    soup = BeautifulSoup(html_text, "html.parser")
+
+    # 1. Next.js Veri Kökü (__NEXT_DATA__)
+    next_data = soup.find("script", id="__NEXT_DATA__")
+    if next_data and next_data.string:
+      try:
+        data = json.loads(next_data.string)
+        # JSON ağacında 'reposts', 'repostCount', 'repostList' veya 'items' ara
+        dumped = json.dumps(data).lower()
+        m = re.search(r'["\']repost(?:count|_count)?["\']\s*:\s*(\d+)', dumped)
+        if m:
+          return int(m.group(1))
+
+        # Eğer doğrudan sayı yoksa liste elemanlarını say
+        props = data.get("props", {}).get("pageProps", {})
+        reposts = (
+            props.get("reposts")
+            or props.get("repostList")
+            or props.get("user", {}).get("reposts")
+        )
+        if isinstance(reposts, list):
+          return len(reposts)
+      except Exception:
+        pass
+
+    # 2. window.__INITIAL_STATE__ veya benzer script yapıları
+    scripts = soup.find_all("script")
+    for s in scripts:
+      if s.string and "repost" in s.string.lower():
+        m = re.search(
+            r'["\']?repost(?:count|_count)?["\']?\s*[:=]\s*(\d+)',
+            s.string,
+            re.IGNORECASE,
+        )
+        if m:
+          return int(m.group(1))
+
+    # 3. Sayfa içi TikTok ID tespiti (Ham HTML)
+    tiktok_ids = set(re.findall(r"\b7\d{18}\b", html_text))
+    if tiktok_ids:
+      return len(tiktok_ids)
+
+    # 4. Sekme metni / UI Sayaç Regex (Örn: Reposts 3, Reposts (3))
+    text = soup.get_text()
+    m_tab = re.search(r"reposts?\s*[\(\:\s]\s*(\d+)", text, re.IGNORECASE)
+    if m_tab:
+      return int(m_tab.group(1))
+
+  except Exception as e:
+    print(f"[!] Repost parse hatası: {e}")
+
+  return None
 
 
 def check_page_count(page_info, current_state_val=0):
@@ -131,12 +188,10 @@ def check_page_count(page_info, current_state_val=0):
     text_lower = text.lower()
 
     if p_type == "viewoo_reposts":
-      tiktok_ids = set(re.findall(r"\b7[0-6]\d{17}\b", html_text))
-      if tiktok_ids:
-        return len(tiktok_ids)
-      if current_state_val > 0:
-        return current_state_val
-      return default_val
+      count = extract_repost_count_from_html(html_text)
+      if count is not None:
+        return count
+      return current_state_val if current_state_val > 0 else default_val
 
     elif p_type == "story":
       empty_phrases = (
@@ -302,7 +357,6 @@ def listen_telegram():
     pass
 
   last_update_id = 0
-  print("[*] Telegram dinleyici devrede.")
 
   while True:
     try:
