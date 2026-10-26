@@ -1,175 +1,266 @@
 from datetime import datetime
-import logging
+import json
+import os
 import re
+import threading
+import time
+from urllib.parse import urlparse
 from bs4 import BeautifulSoup
-from telegram import Bot, Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import requests
-from apscheduler.schedulers.background import BackgroundScheduler
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
-logger = logging.getLogger(__name__)
+# Cloudscraper kontrolü
+try:
+  import cloudscraper
 
-TOKEN = "8902458393:AAFbMG-7nAuIFnBdWsBw5xilDiUCetSkSEg"
-CHAT_ID = "6009524525"
+  HTTP_CLIENT = cloudscraper.create_scraper(
+      browser={"browser": "chrome", "platform": "windows", "desktop": True}
+  )
+  IS_CLOUDSCRAPER = True
+except Exception:
+  HTTP_CLIENT = requests.Session()
+  IS_CLOUDSCRAPER = False
 
-last_states = {
-    "viewoo": None,
-    "tik_1": None,
-    "tik_2": None,
-    "threadlook": None,
+TELEGRAM_BOT_TOKEN = "8902458393:AAFbMG-7nAuIFnBdWsBw5xilDiUCetSkSEg"
+TELEGRAM_CHAT_ID = "6009524525"  # Senin Chat ID'n doğrudan eklendi
+
+CHECK_INTERVAL_SECONDS = 900  # 15 dakikada bir kontrol
+STATE_FILE = "tracker_state.json"
+
+PAGES = {
+    "sillagunerrr_story": {
+        "url": "https://viewoo.co/u/sillagunerrr",
+        "name": "sillagunerrr Hikayeler",
+        "type": "story",
+    },
+    "sillagunerrr_reposts": {
+        "url": "https://tik.watch/tr/@sillagunerrr?tab=reposts",
+        "name": "sillagunerrr Repostlar",
+        "type": "reposts",
+    },
+    "userr44559014_reposts": {
+        "url": "https://tik.watch/tr/@userr44559014?tab=reposts",
+        "name": "userr44559014 Repostlar",
+        "type": "reposts",
+    },
+    "sillagunerr_threads": {
+        "url": "https://threadlook.com/profile/sillagunerr",
+        "name": "sillagunerr Threads",
+        "type": "threads",
+    },
 }
 
-last_check_time = "Henüz kontrol yapılmadı"
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
+        " like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+    ),
+}
 
 
-def fetch_site_data():
-  headers = {
-      "User-Agent": (
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
-          " like Gecko) Chrome/122.0.0.0 Safari/537.36"
-      )
+def send_telegram_message(text):
+  if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    return
+  url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+  payload = {
+      "chat_id": TELEGRAM_CHAT_ID,
+      "text": text,
+      "parse_mode": "Markdown",
   }
-
-  results = {}
-
-  # 1. Viewoo
   try:
-    res = requests.get(
-        "https://viewoo.co/u/sillagunerrr", headers=headers, timeout=15
-    )
-    if res.status_code == 200:
-      text = res.text.lower()
-      results["viewoo"] = (
-          "Hikaye Yok / Bulunamadı"
-          if "hikaye yok" in text or "no story" in text
-          else "Hikaye Var Olabilir!"
-      )
-    else:
-      results["viewoo"] = f"Hata kod: {res.status_code}"
+    requests.post(url, json=payload, timeout=15)
   except Exception as e:
-    results["viewoo"] = f"Hata: {e}"
+    print(f"[!] Gönderim hatası: {e}")
 
-  # 2. Tik.watch 1
+
+def fetch_url(url):
+  if IS_CLOUDSCRAPER:
+    return HTTP_CLIENT.get(url, timeout=25)
+  return requests.get(url, headers=HEADERS, timeout=25)
+
+
+def check_page_count(page_info):
+  url = page_info["url"]
+  p_type = page_info["type"]
   try:
-    res = requests.get(
-        "https://tik.watch/tr/@sillagunerrr?tab=reposts",
-        headers=headers,
-        timeout=15,
-    )
-    if res.status_code == 200:
-      soup = BeautifulSoup(res.text, "html.parser")
-      # Sayfadaki tüm metni veya rakamları ayıkla
-      nums = re.findall(r"\d+", soup.get_text())
-      results["tik_1"] = (
-          f"Bulunan ilk rakamlar: {nums[:5]}"
-          if nums
-          else "Rakam bulunamadı (Dinamik olabilir)"
+    resp = fetch_url(url)
+    if resp.status_code != 200:
+      return -1
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    text = soup.get_text()
+    text_lower = text.lower()
+
+    # 1. Repost Sayımı
+    if p_type == "reposts":
+      # Tik.watch özel video ID tespiti
+      tiktok_video_ids = set(re.findall(r"\b7[0-6]\d{17}\b", resp.text))
+      if len(tiktok_video_ids) > 1:
+        return len(tiktok_video_ids)
+
+      unique_media = set(
+          a.get("href")
+          for a in soup.select("a[href*='/media/'], a[href*='/video/']")
+          if a.get("href")
+          and "video-viewer" not in a.get("href", "").lower()
       )
-    else:
-      results["tik_1"] = f"Hata kod: {res.status_code}"
-  except Exception as e:
-    results["tik_1"] = f"Hata: {e}"
+      if unique_media:
+        return len(unique_media)
 
-  # 3. Tik.watch 2
-  try:
-    res = requests.get(
-        "https://tik.watch/tr/@userr44559014?tab=reposts",
-        headers=headers,
-        timeout=15,
-    )
-    if res.status_code == 200:
-      soup = BeautifulSoup(res.text, "html.parser")
-      nums = re.findall(r"\d+", soup.get_text())
-      results["tik_2"] = (
-          f"Bulunan ilk rakamlar: {nums[:5]}"
-          if nums
-          else "Rakam bulunamadı (Dinamik olabilir)"
+      cards = soup.select(
+          "div.posts__video-item, [data-video-id], .video-card, .repost-item"
       )
-    else:
-      results["tik_2"] = f"Hata kod: {res.status_code}"
-  except Exception as e:
-    results["tik_2"] = f"Hata: {e}"
+      if cards:
+        return len(cards)
 
-  # 4. Threadlook
-  try:
-    res = requests.get(
-        "https://threadlook.com/profile/sillagunerr",
-        headers=headers,
-        timeout=15,
-    )
-    if res.status_code == 200:
-      soup = BeautifulSoup(res.text, "html.parser")
-      nums = re.findall(r"\b\d+\b", soup.get_text())
-      results["threadlook"] = (
-          f"Sayfada geçen sayılar: {nums[:10]}"
-          if nums
-          else "Sayı bulunamadı"
+      return 0
+
+    # 2. Hikaye Sayımı
+    elif p_type == "story":
+      empty_phrases = (
+          "user has no stories",
+          "no stories",
+          "no active stories",
+          "hikaye yok",
+          "0 stories",
       )
-    else:
-      results["threadlook"] = f"Hata kod: {res.status_code}"
-  except Exception as e:
-    results["threadlook"] = f"Hata: {e}"
+      if any(p in text_lower for p in empty_phrases):
+        return 0
 
-  return results
+      story_items = soup.select(
+          "[data-story], [data-story-id], .story-item, a[href*='/story/']"
+      )
+      story_items = [
+          el
+          for el in story_items
+          if "story-viewer" not in (el.get("href") or "").lower()
+      ]
+      if story_items:
+        return len(set(str(el) for el in story_items))
+
+      if bool(soup.find_all("video")) or "data-story" in resp.text.lower():
+        return 1
+      return 0
+
+    # 3. Threads Sayımı (Threadlook)
+    elif p_type == "threads":
+      matches = re.findall(r"THREADS\s*(\d+)", text, re.IGNORECASE)
+      if matches:
+        return int(matches[0])
+      matches_alt = re.findall(r"(\d+)\s*threads", text, re.IGNORECASE)
+      if matches_alt:
+        return int(matches_alt[0])
+
+      # Genel sayısal arama (119 veya benzeri değerler için fallback)
+      numbers = [int(n) for n in re.findall(r"\b\d+\b", text) if len(n) <= 4]
+      if numbers:
+        return max(numbers)  # En olası sayaç değerini döndürür
+
+    return 0
+  except Exception:
+    return -1
 
 
-def check_sites_logic(bot_instance):
-  global last_states, last_check_time
-  last_check_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-  def send_msg(text):
+def load_state():
+  if os.path.exists(STATE_FILE):
     try:
-      bot_instance.send_message(
-          chat_id=CHAT_ID, text=text, parse_mode="Markdown"
+      with open(STATE_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+    except Exception:
+      pass
+  return {}
+
+
+def save_state(state):
+  with open(STATE_FILE, "w", encoding="utf-8") as f:
+    json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+def run_check():
+  current_state = load_state()
+  changes = []
+
+  for key, info in PAGES.items():
+    count = check_page_count(info)
+    if count == -1:
+      continue
+
+    old_count = current_state.get(key, count)
+    if current_state.get(key) is None:
+      current_state[key] = count
+      continue
+
+    if count != old_count:
+      fark = count - old_count
+       yon = "arttı" if fark > 0 else "azaldı"
+      changes.append(
+          f"• *{info['name']}*: `{old_count}` ➔ `{count}` ({fark:+d})"
       )
-    except Exception as e:
-      logger.error(f"Mesaj gönderilemedi: {e}")
+      current_state[key] = count
 
-  # Normal otomatik kontrol döngüsü buraya eklenebilir...
+  save_state(current_state)
 
-
-async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
-  await update.message.reply_text(
-      "🔍 Siteler taranıyor ve analiz ediliyor..."
-  )
-  data = fetch_site_data()
-
-  report = (
-      f"📊 **Anlık Site Test Raporu**\n\n"
-      f"✨ **Viewoo:** {data.get('viewoo')}\n"
-      f"🔄 **Tik.watch (1):** {data.get('tik_1')}\n"
-      f"🔄 **Tik.watch (2):** {data.get('tik_2')}\n"
-      f"📌 **Threadlook:** {data.get('threadlook')}"
-  )
-  await update.message.reply_text(report, parse_mode="Markdown")
+  if changes:
+    msg = "🔔 *İçerik Değişikliği Algılandı!*\n\n" + "\n".join(changes)
+    send_telegram_message(msg)
 
 
-async def cmd_durum(update: Update, context: ContextTypes.DEFAULT_TYPE):
-  durum_metni = (
-      f"🤖 **Bot Çalışıyor!**\n\n"
-      f"⏱️ **Son Kontrol Zamanı:** `{last_check_time}`\n"
-      f"💡 *Sitelerdeki anlık sayıları görmek için* `/test` *yazabilirsin.*"
-  )
-  await update.message.reply_text(durum_metni, parse_mode="Markdown")
+def listen_telegram():
+  last_update_id = 0
+  print("[*] Telegram komut dinleyici aktif.")
+  while True:
+    try:
+      url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
+      r = requests.get(url, params={"offset": last_update_id + 1, "timeout": 20})
+      resp = r.json()
+
+      for item in resp.get("result", []):
+        last_update_id = item["update_id"]
+        msg = item.get("message", {})
+        text = msg.get("text", "").strip()
+        chat_id = str(msg.get("chat", {}).get("id", ""))
+
+        if chat_id != TELEGRAM_CHAT_ID:
+          continue
+
+        if text in ["/durum", "📊 Durum", "/kontrol"]:
+          current_state = load_state()
+          lines = ["📑 *Takip Edilen Sayfalar:*\n"]
+          for key, info in PAGES.items():
+            # Anlık değerleri taze çekelim
+            val = check_page_count(info)
+            if val != -1:
+              current_state[key] = val
+            c = current_state.get(key, 0)
+            lines.append(f"• *{info['name']}*: `{c}`")
+          save_state(current_state)
+          send_telegram_message("\n".join(lines))
+
+    except Exception:
+      time.sleep(5)
+    time.sleep(1)
 
 
-def scheduled_job():
-  temp_bot = Bot(token=TOKEN)
-  # Otomatik kontroller burada çalışır
+def main():
+  print("Master Takip Botu Başlatıldı...")
+  # Komut dinleyiciyi arka planda çalıştır
+  t = threading.Thread(target=listen_telegram, daemon=True)
+  t.start()
+
+  # İlk açılışta durumları kaydet
+  current_state = load_state()
+  for key, info in PAGES.items():
+    if key not in current_state:
+      current_state[key] = check_page_count(info)
+  save_state(current_state)
+
+  # Ana döngü
+  while True:
+    run_check()
+    time.sleep(CHECK_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":
-  scheduler = BackgroundScheduler()
-  scheduler.add_job(scheduled_job, "interval", minutes=10)
-  scheduler.start()
-
-  app = ApplicationBuilder().token(TOKEN).build()
-  app.add_handler(CommandHandler("test", cmd_test))
-  app.add_handler(CommandHandler("durum", cmd_durum))
-
-  logger.info("Test Komutlu Bot Aktif!")
-  app.run_polling()
+  main()
