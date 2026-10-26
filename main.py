@@ -6,8 +6,18 @@ import threading
 import time
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
 import requests
+
+try:
+  import cloudscraper
+
+  HTTP_CLIENT = cloudscraper.create_scraper(
+      browser={"browser": "chrome", "platform": "windows", "desktop": True}
+  )
+  IS_CLOUDSCRAPER = True
+except Exception:
+  HTTP_CLIENT = requests.Session()
+  IS_CLOUDSCRAPER = False
 
 TELEGRAM_BOT_TOKEN = "8902458393:AAFbMG-7nAuIFnBdWsBw5xilDiUCetSkSEg"
 TELEGRAM_CHAT_ID = "6009524525"
@@ -49,6 +59,16 @@ PAGES = {
     },
 }
 
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,"
+        " like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+    ),
+}
+
 
 def get_inline_keyboard():
   return {
@@ -86,107 +106,78 @@ def send_telegram_message(text, reply_markup=None):
     print(f"[!] Gönderim hatası: {e}")
 
 
+def fetch_url(url):
+  try:
+    if IS_CLOUDSCRAPER:
+      return HTTP_CLIENT.get(url, timeout=10)
+    return requests.get(url, headers=HEADERS, timeout=10)
+  except Exception:
+    return None
+
+
 def check_page_count(page_info, current_state_val=0):
   url = page_info["url"]
   p_type = page_info["type"]
   default_val = page_info.get("default_val", 0)
 
   try:
-    with sync_playwright() as p:
-      browser = p.chromium.launch(
-          headless=True, args=["--no-sandbox", "--disable-setuid-sandbox"]
+    resp = fetch_url(url)
+    if not resp or resp.status_code != 200:
+      return current_state_val if current_state_val > 0 else default_val
+
+    html_text = resp.text
+    soup = BeautifulSoup(html_text, "html.parser")
+    text = soup.get_text()
+    text_lower = text.lower()
+
+    if p_type == "viewoo_reposts":
+      tiktok_ids = set(re.findall(r"\b7[0-6]\d{17}\b", html_text))
+      if tiktok_ids:
+        return len(tiktok_ids)
+      if current_state_val > 0:
+        return current_state_val
+      return default_val
+
+    elif p_type == "story":
+      empty_phrases = (
+          "user has no stories",
+          "no stories",
+          "no active stories",
+          "hikaye yok",
+          "0 stories",
       )
-      page = browser.new_page(
-          user_agent=(
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-              " (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-          )
-      )
-      page.goto(url, timeout=40000)
-      page.wait_for_timeout(
-          4000
-      )  # JavaScript verilerinin yüklenmesi için bekleme
-
-      text = page.evaluate("document.body.innerText")
-      text_lower = text.lower()
-      content = page.content()
-
-      if p_type == "viewoo_reposts":
-        # 1. Sekme üzerindeki veya yazılardaki repost sayısını ara (Örn: "Reposts 5")
-        match_tab = re.search(
-            r"reposts?\s*[\(\:]?\s*(\d+)", text_lower, re.IGNORECASE
-        )
-        if match_tab:
-          browser.close()
-          return int(match_tab.group(1))
-
-        # 2. JavaScript ile sayfadaki repost sekmesi veya sayaç elementlerini tara
-        count_val = page.evaluate("""() => {
-                    const elements = Array.from(document.querySelectorAll('a, button, div, span, .badge, .count'));
-                    for (let el of elements) {
-                        if (el.innerText && el.innerText.toLowerCase().includes('repost')) {
-                            const match = el.innerText.match(/\\d+/);
-                            if (match) return parseInt(match[0]);
-                        }
-                    }
-                    return null;
-                """)
-        if count_val is not None:
-          browser.close()
-          return count_val
-
-        # 3. Sayfadaki yüklenen video/repost kartlarını say
-        cards_count = page.locator(
-            "div.posts__video-item, .video-card, .post-card, a[href*='/video/']"
-        ).count()
-        browser.close()
-        if cards_count > 0:
-          return cards_count
-
-        browser.close()
-        return current_state_val if current_state_val > 0 else default_val
-
-      elif p_type == "story":
-        empty_phrases = (
-            "user has no stories",
-            "no stories",
-            "no active stories",
-            "hikaye yok",
-            "0 stories",
-        )
-        if any(p in text_lower for p in empty_phrases):
-          browser.close()
-          return 0
-
-        story_count = page.locator(
-            "[data-story], [data-story-id], .story-item, a[href*='/story/']"
-        ).count()
-        has_video = page.locator("video").count() > 0
-        browser.close()
-
-        if story_count > 0:
-          return story_count
-        if has_video or "data-story" in content.lower():
-          return 1
+      if any(p in text_lower for p in empty_phrases):
         return 0
 
-      elif p_type == "threads":
-        matches = re.findall(r"THREADS\s*(\d+)", text, re.IGNORECASE)
-        browser.close()
-        if matches:
-          return int(matches[0])
-        matches_alt = re.findall(r"(\d+)\s*threads", text, re.IGNORECASE)
-        if matches_alt:
-          return int(matches_alt[0])
+      story_items = soup.select(
+          "[data-story], [data-story-id], .story-item, a[href*='/story/']"
+      )
+      story_items = [
+          el
+          for el in story_items
+          if "story-viewer" not in (el.get("href") or "").lower()
+      ]
+      if story_items:
+        return len(set(str(el) for el in story_items))
 
-        numbers = [int(n) for n in re.findall(r"\b\d+\b", text) if len(n) <= 4]
-        if numbers:
-          return max(numbers)
+      if bool(soup.find_all("video")) or "data-story" in html_text.lower():
+        return 1
+      return 0
 
-      browser.close()
-      return current_state_val if current_state_val > 0 else default_val
-  except Exception as e:
-    print(f"[!] Playwright tarama hatası: {e}")
+    elif p_type == "threads":
+      matches = re.findall(r"THREADS\s*(\d+)", text, re.IGNORECASE)
+      if matches:
+        return int(matches[0])
+      matches_alt = re.findall(r"(\d+)\s*threads", text, re.IGNORECASE)
+      if matches_alt:
+        return int(matches_alt[0])
+
+      numbers = [int(n) for n in re.findall(r"\b\d+\b", text) if len(n) <= 4]
+      if numbers:
+        return max(numbers)
+
+    return current_state_val if current_state_val > 0 else default_val
+  except Exception:
     return current_state_val if current_state_val > 0 else default_val
 
 
@@ -245,7 +236,7 @@ def handle_callback(callback_data, chat_id):
     send_telegram_message("\n".join(lines), reply_markup=get_inline_keyboard())
 
   elif callback_data == "btn_kontrol":
-    send_telegram_message("🔎 Sayfalar taranıyor (Tarayıcı motoru aktif)...")
+    send_telegram_message("🔎 Sayfalar taranıyor...")
     run_check()
     send_telegram_message(
         "✅ Canlı kontrol tamamlandı.", reply_markup=get_inline_keyboard()
@@ -311,7 +302,7 @@ def listen_telegram():
     pass
 
   last_update_id = 0
-  print("[*] Telegram tarayıcı tabanlı dinleyici devrede.")
+  print("[*] Telegram dinleyici devrede.")
 
   while True:
     try:
@@ -358,7 +349,7 @@ def listen_telegram():
 
 
 def main():
-  print("Tarayıcı Tabanlı Master Takip Botu Başlatıldı...")
+  print("Master Takip Botu Başlatıldı...")
 
   current_state = load_state()
   for key, info in PAGES.items():
@@ -370,8 +361,7 @@ def main():
   t.start()
 
   send_telegram_message(
-      "🚀 Bot Tarayıcı Modunda Başlatıldı! Kontrol paneli:",
-      reply_markup=get_inline_keyboard(),
+      "🚀 Bot Başlatıldı! Kontrol paneli:", reply_markup=get_inline_keyboard()
   )
 
   while True:
