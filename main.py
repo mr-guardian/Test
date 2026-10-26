@@ -21,7 +21,7 @@ except Exception:
   IS_CLOUDSCRAPER = False
 
 TELEGRAM_BOT_TOKEN = "8902458393:AAFbMG-7nAuIFnBdWsBw5xilDiUCetSkSEg"
-TELEGRAM_CHAT_ID = "6009524525"  # Senin Chat ID'n doğrudan eklendi
+TELEGRAM_CHAT_ID = "6009524525"
 
 CHECK_INTERVAL_SECONDS = 900  # 15 dakikada bir kontrol
 STATE_FILE = "tracker_state.json"
@@ -95,7 +95,6 @@ def check_page_count(page_info):
 
     # 1. Repost Sayımı
     if p_type == "reposts":
-      # Tik.watch özel video ID tespiti
       tiktok_video_ids = set(re.findall(r"\b7[0-6]\d{17}\b", resp.text))
       if len(tiktok_video_ids) > 1:
         return len(tiktok_video_ids)
@@ -153,10 +152,9 @@ def check_page_count(page_info):
       if matches_alt:
         return int(matches_alt[0])
 
-      # Genel sayısal arama (119 veya benzeri değerler için fallback)
       numbers = [int(n) for n in re.findall(r"\b\d+\b", text) if len(n) <= 4]
       if numbers:
-        return max(numbers)  # En olası sayaç değerini döndürür
+        return max(numbers)
 
     return 0
   except Exception:
@@ -194,7 +192,7 @@ def run_check():
 
     if count != old_count:
       fark = count - old_count
-       yon = "arttı" if fark > 0 else "azaldı"
+      yon = "arttı" if fark > 0 else "azaldı"
       changes.append(
           f"• *{info['name']}*: `{old_count}` ➔ `{count}` ({fark:+d})"
       )
@@ -229,7 +227,6 @@ def listen_telegram():
           current_state = load_state()
           lines = ["📑 *Takip Edilen Sayfalar:*\n"]
           for key, info in PAGES.items():
-            # Anlık değerleri taze çekelim
             val = check_page_count(info)
             if val != -1:
               current_state[key] = val
@@ -245,18 +242,15 @@ def listen_telegram():
 
 def main():
   print("Master Takip Botu Başlatıldı...")
-  # Komut dinleyiciyi arka planda çalıştır
   t = threading.Thread(target=listen_telegram, daemon=True)
   t.start()
 
-  # İlk açılışta durumları kaydet
   current_state = load_state()
   for key, info in PAGES.items():
     if key not in current_state:
       current_state[key] = check_page_count(info)
   save_state(current_state)
 
-  # Ana döngü
   while True:
     run_check()
     time.sleep(CHECK_INTERVAL_SECONDS)
