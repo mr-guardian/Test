@@ -3,7 +3,6 @@ import os
 import re
 import threading
 import time
-from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 import requests
 
@@ -85,6 +84,7 @@ def get_inline_keyboard():
               {"text": "⏸ Durdur", "callback_data": "btn_durdur"},
               {"text": "▶️ Başlat", "callback_data": "btn_baslat"},
           ],
+          [{"text": "🔬 Sayfa Röntgeni (Bana Bas)", "callback_data": "btn_debug"}],
       ]
   }
 
@@ -95,7 +95,7 @@ def send_telegram_message(text, reply_markup=None):
   url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
   payload = {
       "chat_id": TELEGRAM_CHAT_ID,
-      "text": text,
+      "text": text[:4000],  # Telegram karakter sınırı koruması
       "disable_notification": SILENT_MODE,
   }
   if reply_markup:
@@ -115,61 +115,58 @@ def fetch_url(url):
     return None
 
 
-def extract_repost_count_from_html(html_text):
-  """Viewoo'nun HTML veya Next.js/Nuxt gömülü verilerinden gerçek repost sayısını çeker."""
-  try:
-    soup = BeautifulSoup(html_text, "html.parser")
+def run_debug_xray():
+  """Viewoo sayfasının iç yapısını çözüp Telegram'a raporlar."""
+  target_url = "https://viewoo.co/u/emin_htp?tab=reposts"
+  resp = fetch_url(target_url)
 
-    # 1. Next.js Veri Kökü (__NEXT_DATA__)
-    next_data = soup.find("script", id="__NEXT_DATA__")
-    if next_data and next_data.string:
-      try:
-        data = json.loads(next_data.string)
-        # JSON ağacında 'reposts', 'repostCount', 'repostList' veya 'items' ara
-        dumped = json.dumps(data).lower()
-        m = re.search(r'["\']repost(?:count|_count)?["\']\s*:\s*(\d+)', dumped)
-        if m:
-          return int(m.group(1))
+  if not resp:
+    send_telegram_message("❌ Siteye hiç ulaşılamadı (Response None).")
+    return
 
-        # Eğer doğrudan sayı yoksa liste elemanlarını say
-        props = data.get("props", {}).get("pageProps", {})
-        reposts = (
-            props.get("reposts")
-            or props.get("repostList")
-            or props.get("user", {}).get("reposts")
-        )
-        if isinstance(reposts, list):
-          return len(reposts)
-      except Exception:
-        pass
+  html = resp.text
+  soup = BeautifulSoup(html, "html.parser")
 
-    # 2. window.__INITIAL_STATE__ veya benzer script yapıları
-    scripts = soup.find_all("script")
-    for s in scripts:
-      if s.string and "repost" in s.string.lower():
-        m = re.search(
-            r'["\']?repost(?:count|_count)?["\']?\s*[:=]\s*(\d+)',
-            s.string,
-            re.IGNORECASE,
-        )
-        if m:
-          return int(m.group(1))
+  # 1. Tüm class isimlerini topla
+  classes = set()
+  for el in soup.find_all(class_=True):
+    for c in el.get("class", []):
+      classes.add(c)
 
-    # 3. Sayfa içi TikTok ID tespiti (Ham HTML)
-    tiktok_ids = set(re.findall(r"\b7\d{18}\b", html_text))
-    if tiktok_ids:
-      return len(tiktok_ids)
+  # 2. Script ve API ipuçlarını topla
+  scripts_info = []
+  for s in soup.find_all("script"):
+    src = s.get("src", "")
+    if src:
+      scripts_info.append(f"SRC: {src}")
+    elif s.string:
+      snippet = s.string.strip()[:120].replace("\n", " ")
+      scripts_info.append(f"INLINE: {snippet}...")
 
-    # 4. Sekme metni / UI Sayaç Regex (Örn: Reposts 3, Reposts (3))
-    text = soup.get_text()
-    m_tab = re.search(r"reposts?\s*[\(\:\s]\s*(\d+)", text, re.IGNORECASE)
-    if m_tab:
-      return int(m_tab.group(1))
+  # 3. İçinde 'repost', 'api', 'video', 'item', 'card', 'count' geçen satırları yakala
+  keywords_found = re.findall(
+      r".{0,40}(?:repost|api|secUid|itemList|video|count).{0,40}",
+      html,
+      re.IGNORECASE,
+  )
+  sample_matches = list(set(keywords_found))[:15]
 
-  except Exception as e:
-    print(f"[!] Repost parse hatası: {e}")
+  visible_text = re.sub(r"\s+", " ", soup.get_text()).strip()[:400]
 
-  return None
+  report = (
+      "🔬 SAYFA RÖNTGENİ RAPORU\n"
+      f"Durum Kodu: {resp.status_code}\n"
+      f"HTML Boyutu: {len(html)} karakter\n\n"
+      f"📌 Görünen Metin:\n{visible_text}\n\n"
+      f"🏷 Bulunan Class'lar (İlk 30):\n{', '.join(list(classes)[:30])}\n\n"
+      "📜 Scriptler:\n"
+      + "\n".join(scripts_info[:8])
+      + "\n\n"
+      "🔑 Kod İçi İpuçları:\n"
+      + "\n".join(sample_matches)
+  )
+
+  send_telegram_message(report, reply_markup=get_inline_keyboard())
 
 
 def check_page_count(page_info, current_state_val=0):
@@ -188,9 +185,9 @@ def check_page_count(page_info, current_state_val=0):
     text_lower = text.lower()
 
     if p_type == "viewoo_reposts":
-      count = extract_repost_count_from_html(html_text)
-      if count is not None:
-        return count
+      tiktok_ids = set(re.findall(r"\b7\d{18}\b", html_text))
+      if tiktok_ids:
+        return len(tiktok_ids)
       return current_state_val if current_state_val > 0 else default_val
 
     elif p_type == "story":
@@ -322,10 +319,14 @@ def handle_callback(callback_data, chat_id):
         f"🔕 Sessiz mod: {durum}", reply_markup=get_inline_keyboard()
     )
 
+  elif callback_data == "btn_debug":
+    send_telegram_message(
+        "🔬 Sayfa röntgeni çekiliyor, lütfen 3 saniye bekle..."
+    )
+    run_debug_xray()
+
 
 def handle_message(text, chat_id):
-  global CHECK_INTERVAL_SECONDS, IS_TRACKING_PAUSED, SILENT_MODE
-
   if str(chat_id) != str(TELEGRAM_CHAT_ID):
     return
 
@@ -415,7 +416,9 @@ def main():
   t.start()
 
   send_telegram_message(
-      "🚀 Bot Başlatıldı! Kontrol paneli:", reply_markup=get_inline_keyboard()
+      "🚀 Bot Başlatıldı! Röntgen butonuna basarak sayfa yapısını"
+      " çözebiliriz:",
+      reply_markup=get_inline_keyboard(),
   )
 
   while True:
