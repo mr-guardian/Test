@@ -42,8 +42,9 @@ PAGES = {
     },
     "userr44559014_reposts": {
         "url": "https://www.tiktok.com/@userr44559014",
+        "viewoo_url": "https://viewoo.co/u/userr44559014?tab=reposts",
         "name": "userr44559014 Repostlar",
-        "type": "tiktok_direct",
+        "type": "tiktok_repost_tab",
         "username": "userr44559014",
         "default_val": 1
     },
@@ -116,24 +117,41 @@ def fetch_url(url, custom_headers=None):
         return None
 
 
-def fetch_tiktok_repost_tab(username, viewoo_fallback_url=None):
-    """TikTok repost sekmesindeki içerik sayısını API ve sayfa akışı üzerinden çeker."""
+def fetch_repost_count_robust(username, viewoo_fallback_url=None):
+    """Hem Viewoo hem de TikTok kaynaklarını kontrol ederek geçerli repost sayısını çeker."""
+    # 1. Viewoo RSC Repost Sekmesi (En kararlı çalışan yöntem)
+    if viewoo_fallback_url:
+        v_resp = fetch_url(viewoo_fallback_url, {
+            "User-Agent": HEADERS["User-Agent"],
+            "RSC": "1",
+            "Next-Url": f"/u/{username}?tab=reposts"
+        })
+        if v_resp and v_resp.status_code == 200:
+            ids = set(re.findall(r'\b7\d{18}\b', v_resp.text))
+            if len(ids) > 0:
+                return len(ids)
+
+    # 2. TikTok Profil HTML & JSON
     profile_url = f"https://www.tiktok.com/@{username}"
     resp = fetch_url(profile_url)
-    sec_uid = None
-
     if resp and resp.status_code == 200:
         html = resp.text
+
+        # Repost sayacı kalıbı (postCount/videoCount hariç)
+        m_repost = re.search(r'["\']repost(?:Count|_count)?["\']\s*:\s*(\d+)', html, re.IGNORECASE)
+        if m_repost:
+            try:
+                val = int(m_repost.group(1))
+                if val > 0:
+                    return val
+            except Exception:
+                pass
+
+        # secUid üzerinden TikTok Dahili Repost API
         m_sec = re.search(r'["\']secUid["\']\s*:\s*["\']([^"\']+)["\']', html)
         if m_sec:
             sec_uid = m_sec.group(1)
-
-        # 1. TikTok Dahili Repost API Sorgusu
-        if sec_uid:
-            api_url = (
-                f"https://www.tiktok.com/api/user/repost/item_list/"
-                f"?aid=1988&count=35&secUid={sec_uid}"
-            )
+            api_url = f"https://www.tiktok.com/api/user/repost/item_list/?aid=1988&count=35&secUid={sec_uid}"
             api_resp = fetch_url(api_url, {
                 "User-Agent": HEADERS["User-Agent"],
                 "Referer": profile_url,
@@ -148,44 +166,6 @@ def fetch_tiktok_repost_tab(username, viewoo_fallback_url=None):
                 except Exception:
                     pass
 
-        # 2. Doğrudan HTML içindeki repost sayaç kalıbı
-        match_repost = re.search(r'["\']repost(?:Count|_count)?["\']\s*:\s*(\d+)', html)
-        if match_repost:
-            try:
-                val = int(match_repost.group(1))
-                if val > 0:
-                    return val
-            except Exception:
-                pass
-
-    # 3. Viewoo RSC Repost Sekmesi Fallback
-    if viewoo_fallback_url:
-        v_resp = fetch_url(viewoo_fallback_url, {
-            "User-Agent": HEADERS["User-Agent"],
-            "RSC": "1"
-        })
-        if v_resp and v_resp.status_code == 200:
-            ids = set(re.findall(r'\b7\d{18}\b', v_resp.text))
-            if ids:
-                return len(ids)
-
-    return None
-
-
-def fetch_tiktok_direct_reposts(username):
-    url = f"https://www.tiktok.com/@{username}"
-    resp = fetch_url(url)
-    if not resp or resp.status_code != 200:
-        return None
-
-    html = resp.text
-    m_repost = re.search(r'["\']repost(?:Count|_count)?["\']\s*:\s*(\d+)', html, re.IGNORECASE)
-    if m_repost:
-        try:
-            return int(m_repost.group(1))
-        except Exception:
-            pass
-
     return None
 
 
@@ -197,17 +177,11 @@ def check_page_count(page_info, current_state_val=0):
         if p_type == "tiktok_repost_tab":
             username = page_info.get("username")
             viewoo_url = page_info.get("viewoo_url")
-            count = fetch_tiktok_repost_tab(username, viewoo_fallback_url=viewoo_url)
+            count = fetch_repost_count_robust(username, viewoo_fallback_url=viewoo_url)
             if count is not None and count > 0:
                 return count
-            return current_state_val if current_state_val > 0 else default_val
-
-        elif p_type == "tiktok_direct":
-            username = page_info.get("username")
-            count = fetch_tiktok_direct_reposts(username)
-            if count is not None:
-                return count
-            return current_state_val if current_state_val > 0 else default_val
+            # Eğer o an veri çekilemediyse mevcut değeri koru
+            return current_state_val if (current_state_val is not None and current_state_val > 0) else default_val
 
         elif p_type == "story":
             resp = fetch_url(page_info["url"])
