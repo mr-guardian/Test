@@ -13,9 +13,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Telegram Bilgileri (Senin token ve Chat ID'n)
+# Telegram Bilgileri
 TOKEN = "8902458393:AAFbMG-7nAuIFnBdWsBw5xilDiUCetSkSEg"
-CHAT_ID = "8902458393"  # Token'dan önceki kısım
+CHAT_ID = "8902458393"
 
 # Sitelerin son durumlarını hafızada tutmak için global sözlük
 last_states = {
@@ -77,7 +77,6 @@ def check_sites_logic(bot_instance):
     if res.status_code == 200:
       soup = BeautifulSoup(res.text, "html.parser")
       page_text = soup.get_text()
-      # İlk kayıt
       if last_states["tik_1"] is None:
         last_states["tik_1"] = page_text
       elif last_states["tik_1"] != page_text:
@@ -101,27 +100,4 @@ def check_sites_logic(bot_instance):
       elif last_states["tik_2"] != page_text:
         last_states["tik_2"] = page_text
         send_msg(
-            f"🔔 **Tik.watch 2 Güncellemesi!**\n{url}\n🔄 Repost sayısında veya"
-            " içerikte değişiklik algılandı!"
-        )
-  except Exception as e:
-    logger.error(f"Tik.watch 2 hata: {e}")
-
-  # --- 4. Threadlook Kontrolü (119 Değeri) ---
-  try:
-    url = "https://threadlook.com/profile/sillagunerr"
-    res = requests.get(url, headers=headers, timeout=15)
-    if res.status_code == 200:
-      soup = BeautifulSoup(res.text, "html.parser")
-      page_text = soup.get_text()
-
-      # Sayfa içerisinde 119 değerinin geçip geçmediğini kontrol edelim
-      has_119 = "119" in page_text
-
-      if last_states["threadlook"] is None:
-        last_states["threadlook"] = has_119
-      elif last_states["threadlook"] != has_119:
-        last_states["threadlook"] = has_119
-        send_msg(
-            f"🔔 **Threadlook Güncellemesi!**\n{url}\n⚠️ 119 değerinde değişiklik"
-            " oldu! Artık sayf
+            f"🔔 **Tik.watch 2 Güncellemesi!**
