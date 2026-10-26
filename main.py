@@ -37,7 +37,8 @@ PAGES = {
         "name": "sillagunerrr Repostlar",
         "type": "tiktok_direct",
         "username": "sillagunerrr",
-        "default_val": 5
+        "alt_username": "sillagunerr",
+        "default_val": 5  # Gerçek repost sayısı kaçsa buraya yazabilirsiniz
     },
     "userr44559014_reposts": {
         "url": "https://www.tiktok.com/@userr44559014",
@@ -51,7 +52,7 @@ PAGES = {
         "name": "emin_htp Repostlar",
         "type": "tiktok_direct",
         "username": "emin_htp",
-        "default_val": 11
+        "default_val": 0
     },
     "sillagunerr_threads": {
         "url": "https://threadlook.com/profile/sillagunerr",
@@ -114,53 +115,52 @@ def fetch_url(url, custom_headers=None):
         return None
 
 
-def fetch_tiktok_direct_reposts(username):
-    """TikTok profilinin gömülü JSON verisinden repost/video verilerini doğrudan çeker."""
-    url = f"https://www.tiktok.com/@{username}"
-    resp = fetch_url(url)
-    if not resp or resp.status_code != 200:
-        return None
+def fetch_tiktok_direct_reposts(username, alt_username=None):
+    """TikTok profil verilerinden sadece gerçek repostları ayıklar; video/post sayısını hariç tutar."""
+    usernames_to_try = [username]
+    if alt_username and alt_username != username:
+        usernames_to_try.append(alt_username)
 
-    html = resp.text
+    for u in usernames_to_try:
+        url = f"https://www.tiktok.com/@{u}"
+        resp = fetch_url(url)
+        if not resp or resp.status_code != 200:
+            continue
 
-    # 1. __UNIVERSAL_DATA_FOR_REHYDRATION__ ayrıştırma
-    m_univ = re.search(r'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>', html, re.DOTALL)
-    if m_univ:
-        try:
-            data = json.loads(m_univ.group(1))
-            default_scope = data.get("__DEFAULT_SCOPE__", {})
-            user_detail = default_scope.get("webapp.user-detail", {})
-            stats = user_detail.get("userInfo", {}).get("stats", {})
-            
-            # Doğrudan sayaç alanı varsa
-            for k in ["repostCount", "repost_count", "diggCount", "videoCount"]:
-                if k in stats:
-                    val = stats[k]
-                    if isinstance(val, int) and val > 0:
-                        return val
+        html = resp.text
 
-            # Item modülü içindeki liste sayısı
-            item_list = default_scope.get("webapp.video-detail", {}).get("itemList", [])
-            if len(item_list) > 0:
-                return len(item_list)
-        except Exception:
-            pass
+        # 1. __UNIVERSAL_DATA_FOR_REHYDRATION__ içinde repost odaklı arama
+        m_univ = re.search(r'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>', html, re.DOTALL)
+        if m_univ:
+            try:
+                data = json.loads(m_univ.group(1))
+                default_scope = data.get("__DEFAULT_SCOPE__", {})
+                
+                # Sadece repost kelimesi barındıran listeleri kontrol et
+                user_detail = default_scope.get("webapp.user-detail", {})
+                stats = user_detail.get("userInfo", {}).get("stats", {})
+                
+                for k in ["repostCount", "repost_count", "reposts"]:
+                    if k in stats and isinstance(stats[k], int):
+                        return stats[k]
 
-    # 2. SIGI_STATE bloğu ayrıştırma
-    m_sigi = re.search(r'<script id="SIGI_STATE"[^>]*>(.*?)</script>', html, re.DOTALL)
-    if m_sigi:
-        try:
-            data = json.loads(m_sigi.group(1))
-            item_module = data.get("ItemModule", {})
-            if item_module:
-                return len(item_module)
-        except Exception:
-            pass
+                # Repost listesi modülü
+                for key, val in default_scope.items():
+                    if "repost" in key.lower() and isinstance(val, dict):
+                        items = val.get("itemList") or val.get("items")
+                        if isinstance(items, list):
+                            return len(items)
+            except Exception:
+                pass
 
-    # 3. Sayfa içinde yer alan video ID'leri (19 haneli 7 ile başlayan kalıplar)
-    ids = set(re.findall(r'"id"\s*:\s*"([7]\d{18})"', html))
-    if ids:
-        return len(ids)
+        # 2. Ham metin içinde doğrudan repost sayısı eşleşmesi
+        match_repost_text = re.search(r'["\']repost(?:Count|_count)?["\']\s*:\s*(\d+)', html, re.IGNORECASE)
+        if match_repost_text:
+            try:
+                val = int(match_repost_text.group(1))
+                return val
+            except Exception:
+                pass
 
     return None
 
@@ -170,15 +170,14 @@ def check_page_count(page_info, current_state_val=0):
     default_val = page_info.get("default_val", 0)
 
     try:
-        # Doğrudan TikTok Entegrasyonu
         if p_type == "tiktok_direct":
             username = page_info.get("username")
-            count = fetch_tiktok_direct_reposts(username)
-            if count is not None and count > 0:
+            alt_username = page_info.get("alt_username")
+            count = fetch_tiktok_direct_reposts(username, alt_username)
+            if count is not None:
                 return count
             return current_state_val if current_state_val > 0 else default_val
 
-        # Viewoo Hikaye Takibi
         elif p_type == "story":
             resp = fetch_url(page_info["url"])
             if not resp or resp.status_code != 200:
@@ -201,7 +200,6 @@ def check_page_count(page_info, current_state_val=0):
                 return 1
             return 0
 
-        # Threads Takibi
         elif p_type == "threads":
             resp = fetch_url(page_info["url"])
             if not resp or resp.status_code != 200:
@@ -279,7 +277,7 @@ def handle_callback(callback_data, chat_id):
         send_telegram_message("\n".join(lines), reply_markup=get_inline_keyboard())
 
     elif callback_data == "btn_kontrol":
-        send_telegram_message("🔎 Sayfalar taranıyor (TikTok doğrudan sorgulanıyor)...")
+        send_telegram_message("🔎 Sayfalar taranıyor...")
         run_check()
         send_telegram_message("✅ Canlı kontrol tamamlandı.", reply_markup=get_inline_keyboard())
 
@@ -373,7 +371,7 @@ def listen_telegram():
 
 
 def main():
-    print("TikTok Doğrudan Kaynaklı Master Takip Botu Başlatıldı...")
+    print("Master Takip Botu Başlatıldı...")
 
     current_state = load_state()
     for key, info in PAGES.items():
