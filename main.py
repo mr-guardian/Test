@@ -13,9 +13,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Telegram Bilgileri
+# Telegram Bilgileri (Senin Token ve Chat ID'n)
 TOKEN = "8902458393:AAFbMG-7nAuIFnBdWsBw5xilDiUCetSkSEg"
-CHAT_ID = "8902458393"
+CHAT_ID = "6009524525"
 
 # Sitelerin son durumlarını hafızada tutmak için global sözlük
 last_states = {
@@ -100,4 +100,16 @@ def check_sites_logic(bot_instance):
       elif last_states["tik_2"] != page_text:
         last_states["tik_2"] = page_text
         send_msg(
-            f"🔔 **Tik.watch 2 Güncellemesi!**
+            f"🔔 **Tik.watch 2 Güncellemesi!**\n{url}\n🔄 Repost sayısında veya"
+            " içerikte değişiklik algılandı!"
+        )
+  except Exception aset:  # Hata yakalama
+    logger.error(f"Tik.watch 2 hata: {aset}")
+  except Exception as e:
+    logger.error(f"Tik.watch 2 hata: {e}")
+
+  # --- 4. Threadlook Kontrolü (119 Değeri) ---
+  try:
+    url = "https://threadlook.com/profile/sillagunerr"
+    res = requests.get(url, headers=headers, timeout=15)
+    if res.status_code == 200:
