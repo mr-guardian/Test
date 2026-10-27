@@ -6,16 +6,6 @@ import threading
 import requests
 from bs4 import BeautifulSoup
 
-try:
-    import cloudscraper
-    HTTP_CLIENT = cloudscraper.create_scraper(
-        browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True}
-    )
-    IS_CLOUDSCRAPER = True
-except Exception:
-    HTTP_CLIENT = requests.Session()
-    IS_CLOUDSCRAPER = False
-
 TELEGRAM_BOT_TOKEN = "8902458393:AAFbMG-7nAuIFnBdWsBw5xilDiUCetSkSEg"
 TELEGRAM_CHAT_ID = "6009524525"
 
@@ -35,19 +25,19 @@ PAGES = {
     "sillagunerrr_reposts": {
         "username": "sillagunerrr",
         "name": "sillagunerrr Repostlar",
-        "type": "viewoo_api_reposts",
+        "type": "viewoo_reposts",
         "default_val": 6
     },
     "userr44559014_reposts": {
         "username": "userr44559014",
         "name": "userr44559014 Repostlar",
-        "type": "viewoo_api_reposts",
+        "type": "viewoo_reposts",
         "default_val": 1
     },
     "emin_htp_reposts": {
         "username": "emin_htp",
         "name": "emin_htp Repostlar",
-        "type": "viewoo_api_reposts",
+        "type": "viewoo_reposts",
         "default_val": 11
     },
     "sillagunerr_threads": {
@@ -62,9 +52,7 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Referer": "https://viewoo.co/",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache"
+    "Referer": "https://viewoo.co/"
 }
 
 LAST_AUDIT_REPORT = {}
@@ -105,50 +93,35 @@ def send_telegram_message(text, reply_markup=None):
         print(f"[!] Gönderim hatası: {e}")
 
 
-def fetch_url(url, custom_headers=None):
-    h = custom_headers or HEADERS
-    try:
-        if IS_CLOUDSCRAPER:
-            return HTTP_CLIENT.get(url, headers=h, timeout=8)
-        return requests.get(url, headers=h, timeout=8)
-    except Exception:
-        return None
-
-
-def fetch_viewoo_api_reposts(username):
-    """Viewoo resmi repost API'si üzerinden net repost sayısını çeker."""
+def fetch_viewoo_reposts(username):
+    """Viewoo API üzerinden kesin repost sayısını alır."""
     ts = int(time.time())
-    api_url = f"https://viewoo.co/api/reposts?username={username}&_={ts}"
-    resp = fetch_url(api_url)
-
-    if resp and resp.status_code == 200:
-        try:
+    url = f"https://viewoo.co/api/reposts?username={username}&_={ts}"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=8)
+        if resp.status_code == 200:
             data = resp.json()
 
-            # 1. Eğer doğrudan liste dönüyorsa: [ {...}, {...} ]
+            # Liste formatı
             if isinstance(data, list):
-                return len(data), f"Viewoo API Listesi ({len(data)} Repost)"
+                return len(data), f"API Listesi ({len(data)} Repost)"
 
-            # 2. Eğer sözlük formatında items/reposts alanı varsa
+            # Sözlük / Nesne formatı
             if isinstance(data, dict):
                 for k in ["items", "reposts", "data", "videos", "posts"]:
                     if k in data and isinstance(data[k], list):
-                        return len(data[k]), f"Viewoo API ({k}: {len(data[k])} Repost)"
+                        return len(data[k]), f"API ({k}: {len(data[k])} Repost)"
                 if "count" in data and isinstance(data["count"], int):
-                    return data["count"], f"Viewoo API Sayacı ({data['count']})"
-                if "total" in data and isinstance(data["total"], int):
-                    return data["total"], f"Viewoo API Toplamı ({data['total']})"
+                    return data["count"], f"API Sayacı ({data['count']})"
 
-            # 3. JSON içindeki 19 haneli video ID kalıpları
-            raw_text = json.dumps(data)
-            ids = set(re.findall(r'\b7\d{18}\b', raw_text))
+            # Ham JSON içinde 19 haneli video ID'leri
+            ids = set(re.findall(r'\b7\d{18}\b', json.dumps(data)))
             if len(ids) > 0:
-                return len(ids), f"Viewoo API Ham ID ({len(ids)} Repost)"
+                return len(ids), f"API Video ID ({len(ids)} Repost)"
 
-        except Exception as e:
-            return None, f"JSON Ayrıştırma Hatası: {str(e)[:25]}"
-
-    return None, f"API Yanıtı Başarısız (HTTP {resp.status_code if resp else 'None'})"
+        return None, f"HTTP {resp.status_code}"
+    except Exception as e:
+        return None, f"Hata: {str(e)[:25]}"
 
 
 def check_page_count(key, page_info, current_state_val=0):
@@ -157,22 +130,22 @@ def check_page_count(key, page_info, current_state_val=0):
     default_val = page_info.get("default_val", 0)
 
     try:
-        if p_type == "viewoo_api_reposts":
-            username = page_info["username"]
-            count, detail = fetch_viewoo_api_reposts(username)
-
+        # 1. Viewoo Repost Takibi
+        if p_type == "viewoo_reposts":
+            count, detail = fetch_viewoo_reposts(page_info["username"])
             if count is not None:
                 LAST_AUDIT_REPORT[key] = f"✅ Araştırıldı - {detail}"
                 return count
             else:
-                fallback_val = current_state_val if (current_state_val is not None) else default_val
+                fallback = current_state_val if current_state_val is not None else default_val
                 LAST_AUDIT_REPORT[key] = f"⚠️ Araştırıldı - {detail} (Taban Korundu)"
-                return fallback_val
+                return fallback
 
+        # 2. Viewoo Hikaye Takibi
         elif p_type == "story":
-            resp = fetch_url(page_info["url"])
+            resp = requests.get(page_info["url"], headers=HEADERS, timeout=8)
             if not resp or resp.status_code != 200:
-                LAST_AUDIT_REPORT[key] = "❌ Araştırılamadı (Sunucu yanıtı yok)"
+                LAST_AUDIT_REPORT[key] = "❌ Araştırılamadı (Sunucu yanıt vermedi)"
                 return current_state_val if current_state_val is not None else default_val
 
             text_lower = resp.text.lower()
@@ -184,35 +157,33 @@ def check_page_count(key, page_info, current_state_val=0):
             story_items = soup.select("[data-story], [data-story-id], .story-item, a[href*='/story/']")
             if story_items:
                 c = len(set(str(el) for el in story_items))
-                LAST_AUDIT_REPORT[key] = f"✅ Araştırıldı ({c} Aktif Hikaye Kartı Sayıldı)"
+                LAST_AUDIT_REPORT[key] = f"✅ Araştırıldı ({c} Aktif Hikaye)"
                 return c
 
-            LAST_AUDIT_REPORT[key] = "✅ Araştırıldı (Aktif Hikaye Yok)"
+            LAST_AUDIT_REPORT[key] = "✅ Araştırıldı (Hikaye Yok)"
             return 0
 
+        # 3. Threadlook Threads Takibi
         elif p_type == "threads":
-            resp = fetch_url(page_info["url"])
+            resp = requests.get(page_info["url"], headers=HEADERS, timeout=8)
             if not resp or resp.status_code != 200:
                 LAST_AUDIT_REPORT[key] = "❌ Araştırılamadı"
                 return current_state_val if current_state_val is not None else default_val
 
             text = BeautifulSoup(resp.text, "html.parser").get_text()
 
-            matches = re.findall(r'THREADS\s*[:\s]?\s*(\d+)', text, re.IGNORECASE)
-            if matches:
-                val = int(matches[0])
-                if val not in (2025, 2026, 2027):
-                    LAST_AUDIT_REPORT[key] = "✅ Araştırıldı (THREADS Sayacı Doğrulandı)"
-                    return val
+            # "THREADS 122" veya "122 threads" kalıbı (2025/2026 yılları filtrelenir)
+            m = re.findall(r'THREADS\s*[:\s]?\s*(\d+)', text, re.IGNORECASE)
+            if m and int(m[0]) not in (2025, 2026, 2027):
+                LAST_AUDIT_REPORT[key] = "✅ Araştırıldı (THREADS Sayacı Doğrulandı)"
+                return int(m[0])
 
-            matches_alt = re.findall(r'(\d+)\s+threads', text, re.IGNORECASE)
-            if matches_alt:
-                val = int(matches_alt[0])
-                if val not in (2025, 2026, 2027):
-                    LAST_AUDIT_REPORT[key] = "✅ Araştırıldı (Alt Sayaç Doğrulandı)"
-                    return val
+            m_alt = re.findall(r'(\d+)\s+threads', text, re.IGNORECASE)
+            if m_alt and int(m_alt[0]) not in (2025, 2026, 2027):
+                LAST_AUDIT_REPORT[key] = "✅ Araştırıldı (Alt Sayaç Doğrulandı)"
+                return int(m_alt[0])
 
-            LAST_AUDIT_REPORT[key] = "✅ Araştırıldı (Sabit Değer Doğrulandı)"
+            LAST_AUDIT_REPORT[key] = "✅ Araştırıldı (Sabit Değer Korundu)"
             return current_state_val if current_state_val is not None else default_val
 
         return current_state_val if current_state_val is not None else default_val
@@ -266,12 +237,11 @@ def run_check():
 
 def get_status_report_text():
     current_state = load_state()
-    lines = ["📊 GÜNCEL DURUM VE ARAŞTIRMA RAPORU\nKaynak: Viewoo Doğrudan API\n"]
+    lines = ["📊 GÜNCEL DURUM VE ARAŞTIRMA RAPORU\n"]
     for key, info in PAGES.items():
         val = current_state.get(key, info.get("default_val", 0))
         audit = LAST_AUDIT_REPORT.get(key, "Henüz canlı taranmadı")
         lines.append(f"📌 {info['name']}: {val}\n   └ Durum: {audit}\n")
-
     return "\n".join(lines)
 
 
@@ -282,7 +252,7 @@ def handle_callback(callback_data, chat_id):
         send_telegram_message(get_status_report_text(), reply_markup=get_inline_keyboard())
 
     elif callback_data == "btn_kontrol":
-        send_telegram_message("🔎 Doğrudan Viewoo API sorgulaması başlatıldı...")
+        send_telegram_message("🔎 Canlı tarama yapılıyor...")
         run_check()
         send_telegram_message(
             "✅ Kontrol tamamlandı!\n\n" + get_status_report_text(),
@@ -309,6 +279,7 @@ def handle_message(text, chat_id):
 
     text_clean = text.strip()
 
+    # /set komutu ile istenirse manuel değer atama
     if text_clean.startswith("/set "):
         parts = text_clean.split()
         if len(parts) == 3 and parts[2].isdigit():
@@ -319,8 +290,7 @@ def handle_message(text, chat_id):
             send_telegram_message(f"✅ {k} taban değeri {v} yapıldı.", reply_markup=get_inline_keyboard())
             return
 
-    text_lower = text_clean.lower()
-    if "durum" in text_lower or text_lower == "/durum":
+    if "durum" in text_clean.lower() or text_clean == "/durum":
         send_telegram_message(get_status_report_text(), reply_markup=get_inline_keyboard())
         return
 
@@ -380,7 +350,7 @@ def listen_telegram():
 
 
 def main():
-    print("Doğrudan Viewoo API Tabanlı Master Takip Botu Başlatıldı...")
+    print("Sadeleştirilmiş Takip Botu Başlatıldı...")
 
     current_state = load_state()
     for key, info in PAGES.items():
@@ -392,7 +362,7 @@ def main():
     t = threading.Thread(target=listen_telegram, daemon=True)
     t.start()
 
-    send_telegram_message("🚀 Bot Başlatıldı! Viewoo API doğrudan bağlandı.", reply_markup=get_inline_keyboard())
+    send_telegram_message("🚀 Bot Başlatıldı! Temiz ve optimize edilmiş sürüm devrede.", reply_markup=get_inline_keyboard())
 
     while True:
         run_check()
