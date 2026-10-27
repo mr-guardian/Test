@@ -22,7 +22,7 @@ TELEGRAM_CHAT_ID = "6009524525"
 CHECK_INTERVAL_SECONDS = 900
 IS_TRACKING_PAUSED = False
 SILENT_MODE = False
-USE_API_MODE = True  # Varsayılan: Canlı API modu
+USE_API_MODE = True
 
 STATE_FILE = "tracker_state.json"
 
@@ -69,11 +69,8 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache"
 }
 
-# Her sayfanın son araştırılma durumunu tutan sözlük
 LAST_AUDIT_REPORT = {}
 
 
@@ -125,30 +122,39 @@ def fetch_url(url, custom_headers=None):
 
 
 def fetch_repost_via_api(username):
-    """Canlı API modunda TikTok servislerinden sayıyı sorgular."""
+    """Güvenli API kontrolü - Boş yanıt ve JSON çökmesi korumalı."""
     try:
-        # 1. TikWM Servisi
+        # TikWM servisi
         api_url = f"https://www.tikwm.com/api/user/posts?unique_id={username}&count=30"
-        resp = requests.get(api_url, headers=HEADERS, timeout=7).json()
-        if resp.get("code") == 0 and "data" in resp:
-            videos = resp["data"].get("videos", [])
-            reposts = [v for v in videos if v.get("is_repost") is True or "repost" in str(v).lower()]
-            if len(reposts) > 0:
-                return len(reposts), "TikWM API (Canlı Sayıldı)"
+        r = requests.get(api_url, headers=HEADERS, timeout=8)
+        if r.status_code == 200 and r.text.strip().startswith("{"):
+            data = r.json()
+            if data.get("code") == 0 and "data" in data:
+                videos = data["data"].get("videos", [])
+                reposts = [v for v in videos if v.get("is_repost") is True or "repost" in str(v).lower()]
+                if len(reposts) > 0:
+                    return len(reposts), "TikWM API"
+    except Exception:
+        pass
 
-        # 2. Countik Servisi
-        alt_api = f"https://countik.com/api/userinfo/{username}"
-        r_alt = requests.get(alt_api, headers=HEADERS, timeout=7).json()
-        if "reposts" in r_alt:
-            return int(r_alt["reposts"]), "Countik API (Canlı Sayıldı)"
+    try:
+        # TikTok doğrudan web veri bloğu
+        prof_url = f"https://www.tiktok.com/@{username}"
+        r_prof = fetch_url(prof_url)
+        if r_prof and r_prof.status_code == 200:
+            m = re.search(r'["\']repost(?:Count|_count)?["\']\s*:\s*(\d+)', r_prof.text, re.IGNORECASE)
+            if m:
+                val = int(m.group(1))
+                if val > 0:
+                    return val, "TikTok Doğrudan Sayaç"
+    except Exception:
+        pass
 
-        return None, "API'ye ulaşıldı ancak repost listesi boş döndü"
-    except Exception as e:
-        return None, f"API Bağlantı Hatası: {str(e)[:30]}"
+    return None, "API boş yanıt döndü veya engellendi"
 
 
 def fetch_repost_via_scraper(username, viewoo_url):
-    """Web kazıma modunda Viewoo ve TikTok web sayfalarını inceler."""
+    """Web kazıma modunda Viewoo Next.js RSC verisini tarar."""
     try:
         ts = int(time.time())
         v_url = f"{viewoo_url}&_t={ts}" if "?" in viewoo_url else f"{viewoo_url}?_t={ts}"
@@ -160,19 +166,10 @@ def fetch_repost_via_scraper(username, viewoo_url):
         if v_resp and v_resp.status_code == 200:
             ids = set(re.findall(r'\b7\d{18}\b', v_resp.text))
             if len(ids) > 1:
-                return len(ids), "Viewoo RSC Akışı (Kartlar Sayıldı)"
-
-        # TikTok Web Sayfası
-        prof_url = f"https://www.tiktok.com/@{username}?_t={ts}"
-        t_resp = fetch_url(prof_url)
-        if t_resp and t_resp.status_code == 200:
-            m_repost = re.search(r'["\']repost(?:Count|_count)?["\']\s*:\s*(\d+)', t_resp.text, re.IGNORECASE)
-            if m_repost:
-                return int(m_repost.group(1)), "TikTok Profil JSON Sayacı"
-
-        return None, "Sayfalar tarandı ancak kart ID'leri bulunamadı"
+                return len(ids), f"Viewoo RSC ({len(ids)} Kart)"
+        return None, "Kart ID'si bulunamadı"
     except Exception as e:
-        return None, f"Kazıma Hatası: {str(e)[:30]}"
+        return None, f"Hata: {str(e)[:25]}"
 
 
 def check_page_count(key, page_info, current_state_val=0):
@@ -191,22 +188,22 @@ def check_page_count(key, page_info, current_state_val=0):
                 mod_name = "Web Kazıma"
 
             if count is not None and count > 0:
-                LAST_AUDIT_REPORT[key] = f"✅ Araştırıldı ({mod_name}) - Kaynak: {detail}"
+                LAST_AUDIT_REPORT[key] = f"✅ Araştırıldı ({mod_name}) - {detail}"
                 return count
             else:
                 fallback_val = current_state_val if (current_state_val is not None and current_state_val > 0) else default_val
-                LAST_AUDIT_REPORT[key] = f"⚠️ Araştırıldı ({mod_name}) - Sayı alınamadı, taban korundu ({detail})"
+                LAST_AUDIT_REPORT[key] = f"⚠️ Araştırıldı ({mod_name}) - Taban korundu ({detail})"
                 return fallback_val
 
         elif p_type == "story":
             resp = fetch_url(page_info["url"])
             if not resp or resp.status_code != 200:
-                LAST_AUDIT_REPORT[key] = "❌ Araştırılamadı (Sunucu yanıt vermedi)"
+                LAST_AUDIT_REPORT[key] = "❌ Araştırılamadı (Sunucu yanıtı yok)"
                 return current_state_val if current_state_val is not None else default_val
 
             text_lower = resp.text.lower()
             if any(p in text_lower for p in ("no active stories", "no stories", "0 stories", "hikaye yok")):
-                LAST_AUDIT_REPORT[key] = "✅ Araştırıldı (Hikaye Yok Metni Doğrulandı)"
+                LAST_AUDIT_REPORT[key] = "✅ Araştırıldı (Hikaye Yok)"
                 return 0
 
             soup = BeautifulSoup(resp.text, "html.parser")
@@ -215,14 +212,14 @@ def check_page_count(key, page_info, current_state_val=0):
                 c = len(set(str(el) for el in story_items))
                 LAST_AUDIT_REPORT[key] = f"✅ Araştırıldı ({c} Aktif Hikaye Kartı Sayıldı)"
                 return c
-            
+
             LAST_AUDIT_REPORT[key] = "✅ Araştırıldı (Aktif Hikaye Yok)"
             return 0
 
         elif p_type == "threads":
             resp = fetch_url(page_info["url"])
             if not resp or resp.status_code != 200:
-                LAST_AUDIT_REPORT[key] = "❌ Araştırılamadı (Threadlook yanıt vermedi)"
+                LAST_AUDIT_REPORT[key] = "❌ Araştırılamadı"
                 return current_state_val if current_state_val is not None else default_val
 
             text = BeautifulSoup(resp.text, "html.parser").get_text()
@@ -241,14 +238,14 @@ def check_page_count(key, page_info, current_state_val=0):
                     LAST_AUDIT_REPORT[key] = "✅ Araştırıldı (Alt Sayaç Doğrulandı)"
                     return val
 
-            LAST_AUDIT_REPORT[key] = "⚠️ Araştırıldı ancak sayaç bulunamadı (Taban Korundu)"
+            LAST_AUDIT_REPORT[key] = "⚠️ Araştırıldı (Taban Korundu)"
             if current_state_val in (2025, 2026, 2027):
                 return default_val
             return current_state_val if current_state_val is not None else default_val
 
         return current_state_val if current_state_val is not None else default_val
     except Exception as e:
-        LAST_AUDIT_REPORT[key] = f"❌ Hata: {str(e)[:30]}"
+        LAST_AUDIT_REPORT[key] = f"❌ Hata: {str(e)[:25]}"
         return current_state_val if current_state_val is not None else default_val
 
 
@@ -298,13 +295,13 @@ def run_check():
 def get_status_report_text():
     current_state = load_state()
     mod_str = "⚡ Canlı API Modu" if USE_API_MODE else "🌐 Web Kazıma (Scraper) Modu"
-    
+
     lines = [f"📊 GÜNCEL DURUM VE ARAŞTIRMA RAPORU\nAktif Çalışma Modu: {mod_str}\n"]
     for key, info in PAGES.items():
         val = current_state.get(key, info.get("default_val", 0))
-        audit = LAST_AUDIT_REPORT.get(key, "Henüz canlı taranmadı (İlk tarama bekleniyor)")
+        audit = LAST_AUDIT_REPORT.get(key, "Henüz canlı taranmadı")
         lines.append(f"📌 {info['name']}: {val}\n   └ Durum: {audit}\n")
-        
+
     return "\n".join(lines)
 
 
@@ -326,7 +323,7 @@ def handle_callback(callback_data, chat_id):
         USE_API_MODE = not USE_API_MODE
         yeni_mod = "⚡ Canlı API Modu" if USE_API_MODE else "🌐 Web Kazıma (Scraper) Modu"
         send_telegram_message(
-            f"🔄 Çalışma Modu Değiştirildi!\nŞu anki mod: **{yeni_mod}**\n\nŞimdi 'Canlı Kontrol' yaparak farkı test edebilirsin.",
+            f"🔄 Çalışma Modu Değiştirildi!\nŞu anki mod: **{yeni_mod}**\n\n'Canlı Kontrol' butonuna basarak deneyebilirsin.",
             reply_markup=get_inline_keyboard()
         )
 
@@ -428,6 +425,7 @@ def main():
         if key not in current_state:
             current_state[key] = info.get("default_val", 0)
 
+    # 2026/2025 Threads kalıntısı varsa sıfırla
     if current_state.get("sillagunerr_threads") in (2025, 2026, 2027):
         current_state["sillagunerr_threads"] = 0
 
@@ -436,7 +434,7 @@ def main():
     t = threading.Thread(target=listen_telegram, daemon=True)
     t.start()
 
-    send_telegram_message("🚀 Bot Başlatıldı! API/Kazıma Modu ve Teşhis Raporu aktif.", reply_markup=get_inline_keyboard())
+    send_telegram_message("🚀 Bot Başlatıldı! Kontrol paneli güncellendi.", reply_markup=get_inline_keyboard())
 
     while True:
         run_check()
