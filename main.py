@@ -22,7 +22,7 @@ TELEGRAM_CHAT_ID = "6009524525"
 CHECK_INTERVAL_SECONDS = 900
 IS_TRACKING_PAUSED = False
 SILENT_MODE = False
-USE_API_MODE = True
+USE_API_MODE = False  # Doğrudan çalışan Web Kazıma modunu varsayılan yapıyoruz
 
 STATE_FILE = "tracker_state.json"
 
@@ -124,56 +124,80 @@ def fetch_url(url, custom_headers=None):
 
 
 def fetch_repost_via_api(username):
-    """Viewoo tRPC dahili API'si ve TikTok JSON hydration ayrıştırması."""
-    # 1. Viewoo tRPC Dahili Çözümleyici
+    """Açık API köprüleri üzerinden repost kontrolü."""
     try:
-        trpc_url = f"https://viewoo.co/api/trpc/user.getReposts?input=%7B%22json%22%3A%7B%22username%22%3A%22{username}%22%7D%7D"
-        r = fetch_url(trpc_url, {"User-Agent": HEADERS["User-Agent"], "Accept": "application/json"})
-        if r and r.status_code == 200:
+        # TikWM v2 video sorgusu
+        api_url = f"https://www.tikwm.com/api/user/posts?unique_id={username}&count=35"
+        r = requests.get(api_url, headers=HEADERS, timeout=8)
+        if r.status_code == 200 and r.text.strip().startswith("{"):
             data = r.json()
-            items = data.get("result", {}).get("data", {}).get("json", {}).get("items", [])
-            if isinstance(items, list) and len(items) > 0:
-                return len(items), f"Viewoo tRPC API ({len(items)} Repost)"
+            if data.get("code") == 0 and "data" in data:
+                videos = data["data"].get("videos", [])
+                reposts = [v for v in videos if v.get("is_repost") is True or "repost" in str(v).lower()]
+                if len(reposts) > 0:
+                    return len(reposts), f"TikWM API ({len(reposts)} Repost)"
     except Exception:
         pass
 
-    # 2. TikTok Web JSON Hydration Bloğu
     try:
-        ts = int(time.time())
-        prof_url = f"https://www.tiktok.com/@{username}?_={ts}"
-        r_prof = fetch_url(prof_url)
-        if r_prof and r_prof.status_code == 200:
-            m = re.search(r'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>', r_prof.text, re.DOTALL)
-            if m:
-                u_data = json.loads(m.group(1))
-                scope = u_data.get("__DEFAULT_SCOPE__", {})
-                user_detail = scope.get("webapp.user-detail", {})
-                stats = user_detail.get("userInfo", {}).get("stats", {})
-                if "repostCount" in stats and stats["repostCount"] > 0:
-                    return stats["repostCount"], "TikTok Hydration Sayacı"
+        # Countik kullanıcı istatistikleri
+        alt_url = f"https://countik.com/api/userinfo/{username}"
+        r_alt = requests.get(alt_url, headers=HEADERS, timeout=8)
+        if r_alt.status_code == 200 and r_alt.text.strip().startswith("{"):
+            d_alt = r_alt.json()
+            if "reposts" in d_alt and int(d_alt["reposts"]) > 0:
+                return int(d_alt["reposts"]), "Countik API"
     except Exception:
         pass
 
-    return None, "API yanıt vermedi veya liste gizli"
+    return None, "API yanıtı boş veya engelli"
 
 
 def fetch_repost_via_scraper(username, viewoo_url):
-    """Viewoo Next.js RSC ve HTML kart sayımı."""
+    """Viewoo Next.js RSC ve sayfa gövdesindeki video kimliklerini eksiksiz ayıklar."""
     try:
         ts = int(time.time())
-        v_url = f"{viewoo_url}&_t={ts}" if "?" in viewoo_url else f"{viewoo_url}?_t={ts}"
-        v_resp = fetch_url(v_url, {
+        
+        # 1. Next.js Flight Payload / RSC İsteği
+        rsc_headers = {
             "User-Agent": HEADERS["User-Agent"],
             "RSC": "1",
+            "Next-Router-State-Tree": "%5B%22%22%2C%7B%22children%22%3A%5B%22(main)%22%2C%7B%22children%22%3A%5B%22u%22%2C%7B%22children%22%3A%5B%22" + username + "%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%5D%7D%5D%7D%5D%7D%5D%7D%2Cnull%2Cnull%2Ctrue%5D",
             "Next-Url": f"/u/{username}?tab=reposts"
-        })
-        if v_resp and v_resp.status_code == 200:
-            ids = set(re.findall(r'\b7\d{18}\b', v_resp.text))
-            if len(ids) > 1:
-                return len(ids), f"Viewoo RSC ({len(ids)} Kart)"
-        return None, "Kart ID'si bulunamadı"
+        }
+        v_url = f"https://viewoo.co/u/{username}?tab=reposts&_t={ts}"
+        resp = fetch_url(v_url, rsc_headers)
+        
+        if resp and resp.status_code == 200:
+            text = resp.text
+            # 19 haneli TikTok video/aweme ID kalıbı
+            ids = set(re.findall(r'\b7\d{18}\b', text))
+            # Veya video link kalıpları: /video/7...
+            video_links = set(re.findall(r'/video/(7\d{18})', text))
+            all_ids = ids.union(video_links)
+            
+            if len(all_ids) > 0:
+                return len(all_ids), f"Viewoo RSC ({len(all_ids)} Video/Repost Bulundu)"
+
+        # 2. Standart HTML Çözümleme
+        resp_html = fetch_url(f"https://viewoo.co/u/{username}?tab=reposts")
+        if resp_html and resp_html.status_code == 200:
+            html_text = resp_html.text
+            soup = BeautifulSoup(html_text, "html.parser")
+            
+            # Repost kartları veya video kutuları
+            cards = soup.select("[data-video-id], a[href*='/video/'], div[class*='repost'], div[class*='post']")
+            valid_cards = [c for c in cards if "avatar" not in (c.get("class") or [])]
+            if len(valid_cards) > 1:
+                return len(valid_cards), f"Viewoo HTML Kartları ({len(valid_cards)} Adet)"
+            
+            ids_html = set(re.findall(r'\b7\d{18}\b', html_text))
+            if len(ids_html) > 0:
+                return len(ids_html), f"HTML İçerik ID ({len(ids_html)} Adet)"
+
+        return None, "Sayfa tarandı fakat video ID'si eşleşmedi"
     except Exception as e:
-        return None, f"Hata: {str(e)[:25]}"
+        return None, f"Kazıma Hatası: {str(e)[:25]}"
 
 
 def check_page_count(key, page_info, current_state_val=0):
@@ -433,7 +457,7 @@ def main():
     t = threading.Thread(target=listen_telegram, daemon=True)
     t.start()
 
-    send_telegram_message("🚀 Bot Başlatıldı! tRPC ve Hydration motoru aktif.", reply_markup=get_inline_keyboard())
+    send_telegram_message("🚀 Bot Başlatıldı! Gelişmiş RSC kazıma motoru aktif.", reply_markup=get_inline_keyboard())
 
     while True:
         run_check()
