@@ -14,8 +14,9 @@ IS_TRACKING_PAUSED = False
 SILENT_MODE = False
 
 STATE_FILE = "tracker_state.json"
+PAGES_FILE = "tracker_pages.json"
 
-PAGES = {
+DEFAULT_PAGES = {
     "sillagunerrr_story": {
         "url": "https://viewoo.co/u/sillagunerrr",
         "name": "sillagunerrr Hikayeler",
@@ -61,7 +62,31 @@ HEADERS = {
 LAST_AUDIT_REPORT = {}
 
 
+def load_json(filepath, default_val):
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return default_val
+
+
+def save_json(filepath, data):
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def get_pages():
+    pages = load_json(PAGES_FILE, None)
+    if not pages:
+        save_json(PAGES_FILE, DEFAULT_PAGES)
+        return DEFAULT_PAGES
+    return pages
+
+
 def get_inline_keyboard():
+    dk = CHECK_INTERVAL_SECONDS // 60
     return {
         "inline_keyboard": [
             [
@@ -69,6 +94,7 @@ def get_inline_keyboard():
                 {"text": "🔍 Canlı Kontrol", "callback_data": "btn_kontrol"}
             ],
             [
+                {"text": f"⏱ Aralık: {dk} dk", "callback_data": "btn_aralik"},
                 {"text": "🔕 Sessiz Mod", "callback_data": "btn_sessiz"}
             ],
             [
@@ -96,32 +122,65 @@ def send_telegram_message(text, reply_markup=None):
         print(f"[!] Gönderim hatası: {e}")
 
 
+def send_telegram_photo(photo_url, caption=""):
+    """Yeni içeriğin kapak görselini doğrudan sohbet penceresine gönderir."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID or not photo_url:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "photo": photo_url,
+        "caption": str(caption)[:1024],
+        "disable_notification": SILENT_MODE
+    }
+    try:
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        print(f"[!] Fotoğraf gönderilemedi: {e}")
+
+
 def fetch_viewoo_reposts(username):
-    """Viewoo API üzerinden net repost sayısını alır."""
+    """Viewoo API üzerinden repost sayısını ve en son videonun kapak resmini alır."""
     ts = int(time.time())
     url = f"https://viewoo.co/api/reposts?username={username}&_={ts}"
+    latest_cover = None
     try:
         resp = requests.get(url, headers=HEADERS, timeout=8)
         if resp.status_code == 200:
             data = resp.json()
 
+            items_list = []
             if isinstance(data, list):
-                return len(data), f"API Listesi ({len(data)} Repost)"
-
-            if isinstance(data, dict):
+                items_list = data
+            elif isinstance(data, dict):
                 for k in ["items", "reposts", "data", "videos", "posts"]:
                     if k in data and isinstance(data[k], list):
-                        return len(data[k]), f"API ({k}: {len(data[k])} Repost)"
-                if "count" in data and isinstance(data["count"], int):
-                    return data["count"], f"API Sayacı ({data['count']})"
+                        items_list = data[k]
+                        break
+
+            # Kapak görseli ayıklama
+            if items_list and isinstance(items_list[0], dict):
+                first_item = items_list[0]
+                latest_cover = (
+                    first_item.get("cover")
+                    or first_item.get("dynamic_cover")
+                    or first_item.get("cover_image_url")
+                    or first_item.get("thumbnail")
+                )
+
+            if items_list:
+                return len(items_list), f"API Listesi ({len(items_list)} Repost)", latest_cover
+
+            if isinstance(data, dict) and "count" in data and isinstance(data["count"], int):
+                return data["count"], f"API Sayacı ({data['count']})", None
 
             ids = set(re.findall(r'\b7\d{18}\b', json.dumps(data)))
             if len(ids) > 0:
-                return len(ids), f"API Video ID ({len(ids)} Repost)"
+                return len(ids), f"API Video ID ({len(ids)} Repost)", None
 
-        return None, f"HTTP {resp.status_code}"
+        return None, f"HTTP {resp.status_code}", None
     except Exception as e:
-        return None, f"Hata: {str(e)[:25]}"
+        return None, f"Hata: {str(e)[:25]}", None
 
 
 def check_page_count(key, page_info, current_state_val=0):
@@ -130,80 +189,68 @@ def check_page_count(key, page_info, current_state_val=0):
     default_val = page_info.get("default_val", 0)
 
     try:
-        # 1. Viewoo Repost Takibi
         if p_type == "viewoo_reposts":
-            count, detail = fetch_viewoo_reposts(page_info["username"])
+            count, detail, cover_url = fetch_viewoo_reposts(page_info["username"])
             if count is not None:
                 LAST_AUDIT_REPORT[key] = f"✅ Araştırıldı - {detail}"
-                return count
+                return count, cover_url
             else:
                 fallback = current_state_val if current_state_val is not None else default_val
                 LAST_AUDIT_REPORT[key] = f"⚠️ Araştırıldı - {detail} (Taban Korundu)"
-                return fallback
+                return fallback, None
 
-        # 2. Viewoo Hikaye Takibi
         elif p_type == "story":
             resp = requests.get(page_info["url"], headers=HEADERS, timeout=8)
             if not resp or resp.status_code != 200:
                 LAST_AUDIT_REPORT[key] = "❌ Araştırılamadı (Sunucu yanıt vermedi)"
-                return current_state_val if current_state_val is not None else default_val
+                return (current_state_val if current_state_val is not None else default_val), None
 
             text_lower = resp.text.lower()
             if any(p in text_lower for p in ("no active stories", "no stories", "0 stories", "hikaye yok")):
                 LAST_AUDIT_REPORT[key] = "✅ Araştırıldı (Hikaye Yok)"
-                return 0
+                return 0, None
 
             soup = BeautifulSoup(resp.text, "html.parser")
             story_items = soup.select("[data-story], [data-story-id], .story-item, a[href*='/story/']")
+            
+            # İlk hikaye görselini yakalama denemesi
+            story_img = None
             if story_items:
+                first_img = story_items[0].select_one("img")
+                if first_img and first_img.get("src"):
+                    story_img = first_img["src"]
                 c = len(set(str(el) for el in story_items))
                 LAST_AUDIT_REPORT[key] = f"✅ Araştırıldı ({c} Aktif Hikaye)"
-                return c
+                return c, story_img
 
             LAST_AUDIT_REPORT[key] = "✅ Araştırıldı (Hikaye Yok)"
-            return 0
+            return 0, None
 
-        # 3. Threads Takibi
         elif p_type == "threads":
             resp = requests.get(page_info["url"], headers=HEADERS, timeout=8)
             if not resp or resp.status_code != 200:
                 LAST_AUDIT_REPORT[key] = "❌ Araştırılamadı"
-                return current_state_val if current_state_val is not None else default_val
+                return (current_state_val if current_state_val is not None else default_val), None
 
             text = BeautifulSoup(resp.text, "html.parser").get_text()
 
             m = re.findall(r'THREADS\s*[:\s]?\s*(\d+)', text, re.IGNORECASE)
             if m and int(m[0]) not in (2025, 2026, 2027):
                 LAST_AUDIT_REPORT[key] = "✅ Araştırıldı (THREADS Sayacı Doğrulandı)"
-                return int(m[0])
+                return int(m[0]), None
 
             m_alt = re.findall(r'(\d+)\s+threads', text, re.IGNORECASE)
             if m_alt and int(m_alt[0]) not in (2025, 2026, 2027):
                 LAST_AUDIT_REPORT[key] = "✅ Araştırıldı (Alt Sayaç Doğrulandı)"
-                return int(m_alt[0])
+                return int(m_alt[0]), None
 
             LAST_AUDIT_REPORT[key] = "✅ Araştırıldı (Sabit Değer Korundu)"
-            return current_state_val if current_state_val is not None else default_val
+            return (current_state_val if current_state_val is not None else default_val), None
 
-        return current_state_val if current_state_val is not None else default_val
+        return (current_state_val if current_state_val is not None else default_val), None
     except Exception as e:
         LAST_AUDIT_REPORT[key] = f"❌ Hata: {str(e)[:25]}"
-        return current_state_val if current_state_val is not None else default_val
-
-
-def load_state():
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
-
-
-def save_state(state):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+        return (current_state_val if current_state_val is not None else default_val), None
 
 
 def run_check():
@@ -211,13 +258,15 @@ def run_check():
     if IS_TRACKING_PAUSED:
         return
 
-    current_state = load_state()
+    current_state = load_json(STATE_FILE, {})
+    pages = get_pages()
     changes = []
     change_buttons = []
+    new_covers = []
 
-    for key, info in PAGES.items():
+    for key, info in pages.items():
         old_val = current_state.get(key, -1)
-        count = check_page_count(key, info, current_state_val=old_val)
+        count, cover_url = check_page_count(key, info, current_state_val=old_val)
 
         if old_val == -1:
             current_state[key] = count
@@ -227,23 +276,32 @@ def run_check():
             fark = count - old_val
             target_url = info.get("view_url") or info.get("url", "https://viewoo.co")
             
-            changes.append(f"• {info['name']}: {old_val} ➔ {count} ({fark:+d})\n  🔗 Görsel/İçerik Linki: {target_url}")
+            changes.append(f"• {info['name']}: {old_val} ➔ {count} ({fark:+d})\n  🔗 Profil: {target_url}")
             change_buttons.append([{"text": f"🔗 {info['name']} Görüntüle", "url": target_url}])
+            
+            # Artış olduysa ve görsel adresi bulunduysa kaydet
+            if fark > 0 and cover_url:
+                new_covers.append((cover_url, f"📸 {info['name']} için yeni içerik kapağı!"))
+
             current_state[key] = count
 
-    save_state(current_state)
+    save_json(STATE_FILE, current_state)
 
     if changes:
-        # Normal kontrol butonlarını link butonlarının altına ekle
+        # Önce kapak görsellerini gönder (Özellik 1)
+        for c_url, c_caption in new_covers:
+            send_telegram_photo(c_url, caption=c_caption)
+
         custom_keyboard = {"inline_keyboard": change_buttons + get_inline_keyboard()["inline_keyboard"]}
         msg = "🔔 İçerik Değişikliği Algılandı!\n\n" + "\n\n".join(changes)
         send_telegram_message(msg, reply_markup=custom_keyboard)
 
 
 def get_status_report_text():
-    current_state = load_state()
+    current_state = load_json(STATE_FILE, {})
+    pages = get_pages()
     lines = ["📊 GÜNCEL DURUM VE ARAŞTIRMA RAPORU\n"]
-    for key, info in PAGES.items():
+    for key, info in pages.items():
         val = current_state.get(key, info.get("default_val", 0))
         audit = LAST_AUDIT_REPORT.get(key, "Henüz canlı taranmadı")
         lines.append(f"📌 {info['name']}: {val}\n   └ Durum: {audit}\n")
@@ -264,6 +322,12 @@ def handle_callback(callback_data, chat_id):
             reply_markup=get_inline_keyboard()
         )
 
+    elif callback_data == "btn_aralik":
+        send_telegram_message(
+            f"⏱ Mevcut aralık: {CHECK_INTERVAL_SECONDS // 60} dakika.\n"
+            "Değiştirmek için sohbete komut yazın:\nÖrnek: `/aralik 5` (5 dakikada bir kontrol eder)"
+        )
+
     elif callback_data == "btn_durdur":
         IS_TRACKING_PAUSED = True
         send_telegram_message("⏸ Otomatik takip duraklatıldı.", reply_markup=get_inline_keyboard())
@@ -279,18 +343,92 @@ def handle_callback(callback_data, chat_id):
 
 
 def handle_message(text, chat_id):
+    global CHECK_INTERVAL_SECONDS
     if str(chat_id) != str(TELEGRAM_CHAT_ID):
         return
 
     text_clean = text.strip()
 
+    # 1. Tarama Sıklığını Değiştirme Komutu: /aralik 10
+    if text_clean.startswith("/aralik "):
+        parts = text_clean.split()
+        if len(parts) == 2 and parts[1].isdigit():
+            dakika = int(parts[1])
+            if dakika >= 1:
+                CHECK_INTERVAL_SECONDS = dakika * 60
+                send_telegram_message(f"⏱ Tarama sıklığı {dakika} dakika olarak ayarlandı.", reply_markup=get_inline_keyboard())
+                return
+            else:
+                send_telegram_message("Aralık en az 1 dakika olmalıdır.")
+                return
+
+    # 2. Canlı Hedef Ekleme Komutu: /ekle repost kullanici_adi veya /ekle hikaye kullanici_adi
+    if text_clean.startswith("/ekle "):
+        parts = text_clean.split()
+        if len(parts) == 3:
+            tur, user = parts[1].lower(), parts[2].lower()
+            pages = get_pages()
+            key = f"{user}_{tur}"
+
+            if tur in ["repost", "reposts"]:
+                pages[key] = {
+                    "username": user,
+                    "view_url": f"https://viewoo.co/u/{user}?tab=reposts",
+                    "name": f"{user} Repostlar",
+                    "type": "viewoo_reposts",
+                    "default_val": 0
+                }
+            elif tur in ["hikaye", "story"]:
+                pages[key] = {
+                    "url": f"https://viewoo.co/u/{user}",
+                    "name": f"{user} Hikayeler",
+                    "type": "story",
+                    "default_val": 0
+                }
+            elif tur in ["threads"]:
+                pages[key] = {
+                    "url": f"https://threadlook.com/profile/{user}",
+                    "name": f"{user} Threads",
+                    "type": "threads",
+                    "default_val": 0
+                }
+            else:
+                send_telegram_message("Geçersiz tür! Kullanım:\n`/ekle repost kullanici`\n`/ekle hikaye kullanici`\n`/ekle threads kullanici`")
+                return
+
+            save_json(PAGES_FILE, pages)
+            send_telegram_message(f"✅ Yeni hedef başarıyla eklendi:\n• {pages[key]['name']}", reply_markup=get_inline_keyboard())
+            return
+
+    # 3. Canlı Hedef Çıkarma Komutu: /cikar kullanici_adi veya /sil kullanici_adi
+    if text_clean.startswith(("/cikar ", "/sil ")):
+        parts = text_clean.split()
+        if len(parts) == 2:
+            target = parts[1].lower()
+            pages = get_pages()
+            silinenler = []
+
+            for k in list(pages.keys()):
+                if target in k:
+                    silinenler.append(pages[k]["name"])
+                    del pages[k]
+
+            if silinenler:
+                save_json(PAGES_FILE, pages)
+                send_telegram_message(f"🗑 Takip listesinden çıkarıldı:\n• " + "\n• ".join(silinenler), reply_markup=get_inline_keyboard())
+                return
+            else:
+                send_telegram_message(f"'{target}' ismini içeren bir hedef bulunamadı.")
+                return
+
+    # 4. Manuel Taban Değer Eşitleme: /set hedef deger
     if text_clean.startswith("/set "):
         parts = text_clean.split()
         if len(parts) == 3 and parts[2].isdigit():
             k, v = parts[1], int(parts[2])
-            current_state = load_state()
+            current_state = load_json(STATE_FILE, {})
             current_state[k] = v
-            save_state(current_state)
+            save_json(STATE_FILE, current_state)
             send_telegram_message(f"✅ {k} taban değeri {v} yapıldı.", reply_markup=get_inline_keyboard())
             return
 
@@ -299,7 +437,19 @@ def handle_message(text, chat_id):
         return
 
     if text_clean in ["/start", "/yardim", "anasayfa"]:
-        send_telegram_message("👋 Bot aktif! Kontrol paneli hazır:", reply_markup=get_inline_keyboard())
+        rehber = (
+            "👋 **Gelişmiş Takip Botu Komutları:**\n\n"
+            "⏱ **Tarama Sıklığı:**\n"
+            "• `/aralik 5` ➔ Kontrol süresini 5 dakika yapar.\n\n"
+            "🎯 **Hedef Yönetimi:**\n"
+            "• `/ekle repost kullanici` ➔ Yeni repost takibi başlatır.\n"
+            "• `/ekle hikaye kullanici` ➔ Yeni hikaye takibi başlatır.\n"
+            "• `/ekle threads kullanici` ➔ Yeni Threads takibi başlatır.\n"
+            "• `/cikar kullanici` ➔ Kullanıcıyı tüm takiplerden çıkarır.\n\n"
+            "⚙️ **Sayaç Ayarı:**\n"
+            "• `/set anahtar_adi deger` ➔ Sayacı manuel eşitler."
+        )
+        send_telegram_message(rehber, reply_markup=get_inline_keyboard())
 
 
 def listen_telegram():
@@ -354,19 +504,20 @@ def listen_telegram():
 
 
 def main():
-    print("Sadeleştirilmiş Takip Botu Başlatıldı...")
+    print("Kapak Görselli ve Dinamik Hedef Yönetimli Takip Botu Başlatıldı...")
 
-    current_state = load_state()
-    for key, info in PAGES.items():
+    pages = get_pages()
+    current_state = load_json(STATE_FILE, {})
+    for key, info in pages.items():
         if key not in current_state:
             current_state[key] = info.get("default_val", 0)
 
-    save_state(current_state)
+    save_json(STATE_FILE, current_state)
 
     t = threading.Thread(target=listen_telegram, daemon=True)
     t.start()
 
-    send_telegram_message("🚀 Bot Başlatıldı! Link bildirim sistemi aktif.", reply_markup=get_inline_keyboard())
+    send_telegram_message("🚀 Bot Başlatıldı! Kapak görseli ve canlı hedef yönetimi devrede.", reply_markup=get_inline_keyboard())
 
     while True:
         run_check()
