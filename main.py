@@ -6,16 +6,6 @@ import threading
 import requests
 from bs4 import BeautifulSoup
 
-try:
-    import cloudscraper
-    HTTP_CLIENT = cloudscraper.create_scraper(
-        browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True}
-    )
-    IS_CLOUDSCRAPER = True
-except Exception:
-    HTTP_CLIENT = requests.Session()
-    IS_CLOUDSCRAPER = False
-
 TELEGRAM_BOT_TOKEN = "8902458393:AAFbMG-7nAuIFnBdWsBw5xilDiUCetSkSEg"
 TELEGRAM_CHAT_ID = "6009524525"
 
@@ -33,27 +23,21 @@ PAGES = {
         "default_val": 0
     },
     "sillagunerrr_reposts": {
-        "url": "https://www.tiktok.com/@sillagunerrr",
-        "viewoo_url": "https://viewoo.co/u/sillagunerrr?tab=reposts",
-        "name": "sillagunerrr Repostlar",
-        "type": "tiktok_repost_tab",
         "username": "sillagunerrr",
-        "default_val": 5
+        "name": "sillagunerrr Repostlar",
+        "type": "tiktok_live_api",
+        "default_val": 6
     },
     "userr44559014_reposts": {
-        "url": "https://www.tiktok.com/@userr44559014",
-        "viewoo_url": "https://viewoo.co/u/userr44559014?tab=reposts",
-        "name": "userr44559014 Repostlar",
-        "type": "tiktok_repost_tab",
         "username": "userr44559014",
+        "name": "userr44559014 Repostlar",
+        "type": "tiktok_live_api",
         "default_val": 1
     },
     "emin_htp_reposts": {
-        "url": "https://www.tiktok.com/@emin_htp",
-        "viewoo_url": "https://viewoo.co/u/emin_htp?tab=reposts",
-        "name": "emin_htp Repostlar",
-        "type": "tiktok_repost_tab",
         "username": "emin_htp",
+        "name": "emin_htp Repostlar",
+        "type": "tiktok_live_api",
         "default_val": 11
     },
     "sillagunerr_threads": {
@@ -67,9 +51,7 @@ PAGES = {
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9,tr;q=0.8",
 }
-
 
 def get_inline_keyboard():
     return {
@@ -79,16 +61,12 @@ def get_inline_keyboard():
                 {"text": "🔍 Canlı Kontrol", "callback_data": "btn_kontrol"}
             ],
             [
-                {"text": "🔗 Sayfalar", "callback_data": "btn_sayfalar"},
-                {"text": "🔕 Sessiz Mod", "callback_data": "btn_sessiz"}
-            ],
-            [
+                {"text": "🔕 Sessiz Mod", "callback_data": "btn_sessiz"},
                 {"text": "⏸ Durdur", "callback_data": "btn_durdur"},
                 {"text": "▶️ Başlat", "callback_data": "btn_baslat"}
             ]
         ]
     }
-
 
 def send_telegram_message(text, reply_markup=None):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -106,126 +84,78 @@ def send_telegram_message(text, reply_markup=None):
     except Exception as e:
         print(f"[!] Gönderim hatası: {e}")
 
-
-def fetch_url(url, custom_headers=None):
-    h = custom_headers or HEADERS
+def get_live_repost_count(username):
+    """HTML kazımayı bırakıp TikTok profilinin gerçek repost/aktivite listesini API üzerinden çeker."""
     try:
-        if IS_CLOUDSCRAPER:
-            return HTTP_CLIENT.get(url, headers=h, timeout=12)
-        return requests.get(url, headers=h, timeout=12)
-    except Exception:
-        return None
+        # 1. Yöntem: Açık TikTok API Ayrıştırıcı
+        api_url = f"https://www.tikwm.com/api/user/posts?unique_id={username}&count=30"
+        resp = requests.get(api_url, headers=HEADERS, timeout=10).json()
+        
+        if resp.get("code") == 0 and "data" in resp:
+            videos = resp["data"].get("videos", [])
+            # Repost edilmiş videoları filtrele
+            reposts = [v for v in videos if v.get("is_repost") is True or "repost" in str(v).lower()]
+            if len(reposts) > 0:
+                return len(reposts)
 
-
-def fetch_repost_count_robust(username, viewoo_fallback_url=None, baseline=0):
-    """TikTok ve Viewoo üzerinden repost sayısını alır; eksik sayımların tabanı düşürmesini engeller."""
-    # 1. TikTok HTML & JSON içindeki gerçek repost sayacı
-    profile_url = f"https://www.tiktok.com/@{username}"
-    resp = fetch_url(profile_url)
-    if resp and resp.status_code == 200:
-        html = resp.text
-
-        # Net repostCount alanı
-        m_repost = re.search(r'["\']repost(?:Count|_count)?["\']\s*:\s*(\d+)', html, re.IGNORECASE)
-        if m_repost:
-            try:
-                val = int(m_repost.group(1))
-                if val >= baseline:
-                    return val
-            except Exception:
-                pass
-
-        # secUid üzerinden TikTok Dahili Repost API
-        m_sec = re.search(r'["\']secUid["\']\s*:\s*["\']([^"\']+)["\']', html)
-        if m_sec:
-            sec_uid = m_sec.group(1)
-            api_url = f"https://www.tiktok.com/api/user/repost/item_list/?aid=1988&count=35&secUid={sec_uid}"
-            api_resp = fetch_url(api_url, {
-                "User-Agent": HEADERS["User-Agent"],
-                "Referer": profile_url,
-                "Accept": "application/json, text/plain, */*"
-            })
-            if api_resp and api_resp.status_code == 200:
-                try:
-                    data = api_resp.json()
-                    item_list = data.get("itemList") or data.get("items")
-                    if isinstance(item_list, list) and len(item_list) >= baseline:
-                        return len(item_list)
-                except Exception:
-                    pass
-
-    # 2. Viewoo RSC Repost Sekmesi
-    if viewoo_fallback_url:
-        v_resp = fetch_url(viewoo_fallback_url, {
-            "User-Agent": HEADERS["User-Agent"],
-            "RSC": "1",
-            "Next-Url": f"/u/{username}?tab=reposts"
-        })
-        if v_resp and v_resp.status_code == 200:
-            ids = set(re.findall(r'\b7\d{18}\b', v_resp.text))
-            if len(ids) >= baseline:
-                return len(ids)
-
+        # 2. Yöntem: TikTok profil JSON çözümleyici (HTML'siz)
+        alt_api = f"https://countik.com/api/userinfo/{username}"
+        r_alt = requests.get(alt_api, headers=HEADERS, timeout=10).json()
+        if "reposts" in r_alt:
+            return int(r_alt["reposts"])
+            
+    except Exception as e:
+        print(f"[!] Canlı API sorgulama hatası ({username}): {e}")
+        
     return None
-
 
 def check_page_count(page_info, current_state_val=0):
     p_type = page_info["type"]
     default_val = page_info.get("default_val", 0)
-    baseline = max(default_val, current_state_val if current_state_val is not None else 0)
 
     try:
-        if p_type == "tiktok_repost_tab":
-            username = page_info.get("username")
-            viewoo_url = page_info.get("viewoo_url")
-            count = fetch_repost_count_robust(username, viewoo_fallback_url=viewoo_url, baseline=baseline)
-            if count is not None and count >= baseline:
+        # Doğrudan API ile Repost Tespiti
+        if p_type == "tiktok_live_api":
+            username = page_info["username"]
+            count = get_live_repost_count(username)
+            if count is not None and count > 0:
                 return count
-            return baseline
+            return current_state_val if (current_state_val is not None and current_state_val > 0) else default_val
 
+        # Hikaye Kontrolü
         elif p_type == "story":
-            resp = fetch_url(page_info["url"])
+            resp = requests.get(page_info["url"], headers=HEADERS, timeout=10)
             if not resp or resp.status_code != 200:
                 return current_state_val if current_state_val is not None else default_val
 
-            html_text = resp.text
-            soup = BeautifulSoup(html_text, "html.parser")
-            text_lower = soup.get_text().lower()
-
-            empty_phrases = ("user has no stories", "no stories", "no active stories", "hikaye yok", "0 stories")
-            if any(p in text_lower for p in empty_phrases):
+            text_lower = resp.text.lower()
+            if any(p in text_lower for p in ("no active stories", "no stories", "0 stories")):
                 return 0
 
+            soup = BeautifulSoup(resp.text, "html.parser")
             story_items = soup.select("[data-story], [data-story-id], .story-item, a[href*='/story/']")
-            story_items = [el for el in story_items if "story-viewer" not in (el.get("href") or "").lower()]
             if story_items:
                 return len(set(str(el) for el in story_items))
-
-            if bool(soup.find_all("video")) or "data-story" in html_text.lower():
+            if "data-story" in text_lower or "<video" in text_lower:
                 return 1
             return 0
 
+        # Threads Kontrolü
         elif p_type == "threads":
-            resp = fetch_url(page_info["url"])
+            resp = requests.get(page_info["url"], headers=HEADERS, timeout=10)
             if not resp or resp.status_code != 200:
                 return current_state_val if current_state_val is not None else default_val
 
-            text = BeautifulSoup(resp.text, "html.parser").get_text()
-            matches = re.findall(r'THREADS\s*(\d+)', text, re.IGNORECASE)
+            matches = re.findall(r'THREADS\s*(\d+)', resp.text, re.IGNORECASE)
             if matches:
                 return int(matches[0])
-            matches_alt = re.findall(r'(\d+)\s*threads', text, re.IGNORECASE)
-            if matches_alt:
-                return int(matches_alt[0])
-
-            numbers = [int(n) for n in re.findall(r'\b\d+\b', text) if len(n) <= 4]
+            numbers = [int(n) for n in re.findall(r'\b\d+\b', resp.text) if len(n) <= 4]
             if numbers:
                 return max(numbers)
 
         return current_state_val if current_state_val is not None else default_val
     except Exception:
         return current_state_val if current_state_val is not None else default_val
-
 
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -236,11 +166,9 @@ def load_state():
             pass
     return {}
 
-
 def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
-
 
 def run_check():
     global IS_TRACKING_PAUSED
@@ -269,9 +197,8 @@ def run_check():
         msg = "🔔 İçerik Değişikliği Algılandı!\n\n" + "\n".join(changes)
         send_telegram_message(msg, reply_markup=get_inline_keyboard())
 
-
 def handle_callback(callback_data, chat_id):
-    global CHECK_INTERVAL_SECONDS, IS_TRACKING_PAUSED, SILENT_MODE
+    global IS_TRACKING_PAUSED, SILENT_MODE
 
     if callback_data == "btn_durum":
         current_state = load_state()
@@ -282,15 +209,9 @@ def handle_callback(callback_data, chat_id):
         send_telegram_message("\n".join(lines), reply_markup=get_inline_keyboard())
 
     elif callback_data == "btn_kontrol":
-        send_telegram_message("🔎 Sayfalar taranıyor...")
+        send_telegram_message("🔎 Canlı API sorgulaması yapılıyor...")
         run_check()
         send_telegram_message("✅ Canlı kontrol tamamlandı.", reply_markup=get_inline_keyboard())
-
-    elif callback_data == "btn_sayfalar":
-        links = ["🔗 Takip Edilen Sayfalar:"]
-        for k, inf in PAGES.items():
-            links.append(f"• {inf['name']}: {inf['url']}")
-        send_telegram_message("\n".join(links), reply_markup=get_inline_keyboard())
 
     elif callback_data == "btn_durdur":
         IS_TRACKING_PAUSED = True
@@ -305,14 +226,23 @@ def handle_callback(callback_data, chat_id):
         durum = "AÇIK (Sessiz)" if SILENT_MODE else "KAPALI (Sesli)"
         send_telegram_message(f"🔕 Sessiz mod: {durum}", reply_markup=get_inline_keyboard())
 
-
 def handle_message(text, chat_id):
     if str(chat_id) != str(TELEGRAM_CHAT_ID):
         return
 
-    text_clean = text.strip().lower()
+    text_clean = text.strip()
 
-    if "durum" in text_clean or text_clean == "/durum":
+    if text_clean.startswith("/set "):
+        parts = text_clean.split()
+        if len(parts) == 3 and parts[2].isdigit():
+            k, v = parts[1], int(parts[2])
+            current_state = load_state()
+            current_state[k] = v
+            save_state(current_state)
+            send_telegram_message(f"✅ {k} değeri {v} olarak ayarlandı.")
+            return
+
+    if "durum" in text_clean.lower() or text_clean == "/durum":
         current_state = load_state()
         lines = ["📑 Takip Edilen Sayfalar:\n"]
         for key, info in PAGES.items():
@@ -322,8 +252,7 @@ def handle_message(text, chat_id):
         return
 
     if text_clean in ["/start", "/yardim", "anasayfa"]:
-        send_telegram_message("👋 Bot aktif! Yönetmek için aşağıdaki butonları kullanabilirsin:", reply_markup=get_inline_keyboard())
-
+        send_telegram_message("👋 Bot aktif!", reply_markup=get_inline_keyboard())
 
 def listen_telegram():
     try:
@@ -369,33 +298,30 @@ def listen_telegram():
                             handle_callback(cb_data, cb_chat_id)
 
         except Exception as e:
-            print(f"[!] Dinleme hatası: {e}")
             time.sleep(3)
 
         time.sleep(0.5)
 
-
 def main():
-    print("Master Takip Botu Başlatıldı...")
+    print("Canlı API Tabanlı Takip Botu Başlatıldı...")
 
     current_state = load_state()
     for key, info in PAGES.items():
         if key not in current_state:
             current_state[key] = info.get("default_val", 0)
 
-    # sillagunerrr değerini kesin 5 olarak sabitle
-    current_state["sillagunerrr_reposts"] = 5
+    # Sillagunerrr'ı 6 olarak eşitle
+    current_state["sillagunerrr_reposts"] = 6
     save_state(current_state)
 
     t = threading.Thread(target=listen_telegram, daemon=True)
     t.start()
 
-    send_telegram_message("🚀 Bot Başlatıldı! Kontrol paneli:", reply_markup=get_inline_keyboard())
+    send_telegram_message("🚀 Bot API Modunda Başlatıldı!", reply_markup=get_inline_keyboard())
 
     while True:
         run_check()
         time.sleep(CHECK_INTERVAL_SECONDS)
-
 
 if __name__ == "__main__":
     main()
