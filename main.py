@@ -51,6 +51,7 @@ PAGES = {
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7"
 }
 
 def get_inline_keyboard():
@@ -85,27 +86,24 @@ def send_telegram_message(text, reply_markup=None):
         print(f"[!] Gönderim hatası: {e}")
 
 def get_live_repost_count(username):
-    """HTML kazımayı bırakıp TikTok profilinin gerçek repost/aktivite listesini API üzerinden çeker."""
+    """TikTok profil verilerinden gerçek repost sayısını çeker."""
     try:
-        # 1. Yöntem: Açık TikTok API Ayrıştırıcı
         api_url = f"https://www.tikwm.com/api/user/posts?unique_id={username}&count=30"
         resp = requests.get(api_url, headers=HEADERS, timeout=10).json()
         
         if resp.get("code") == 0 and "data" in resp:
             videos = resp["data"].get("videos", [])
-            # Repost edilmiş videoları filtrele
             reposts = [v for v in videos if v.get("is_repost") is True or "repost" in str(v).lower()]
             if len(reposts) > 0:
                 return len(reposts)
 
-        # 2. Yöntem: TikTok profil JSON çözümleyici (HTML'siz)
         alt_api = f"https://countik.com/api/userinfo/{username}"
         r_alt = requests.get(alt_api, headers=HEADERS, timeout=10).json()
         if "reposts" in r_alt:
             return int(r_alt["reposts"])
             
     except Exception as e:
-        print(f"[!] Canlı API sorgulama hatası ({username}): {e}")
+        print(f"[!] Canlı API hatası ({username}): {e}")
         
     return None
 
@@ -114,7 +112,6 @@ def check_page_count(page_info, current_state_val=0):
     default_val = page_info.get("default_val", 0)
 
     try:
-        # Doğrudan API ile Repost Tespiti
         if p_type == "tiktok_live_api":
             username = page_info["username"]
             count = get_live_repost_count(username)
@@ -122,14 +119,13 @@ def check_page_count(page_info, current_state_val=0):
                 return count
             return current_state_val if (current_state_val is not None and current_state_val > 0) else default_val
 
-        # Hikaye Kontrolü
         elif p_type == "story":
             resp = requests.get(page_info["url"], headers=HEADERS, timeout=10)
             if not resp or resp.status_code != 200:
                 return current_state_val if current_state_val is not None else default_val
 
             text_lower = resp.text.lower()
-            if any(p in text_lower for p in ("no active stories", "no stories", "0 stories")):
+            if any(p in text_lower for p in ("no active stories", "no stories", "0 stories", "hikaye yok")):
                 return 0
 
             soup = BeautifulSoup(resp.text, "html.parser")
@@ -140,18 +136,31 @@ def check_page_count(page_info, current_state_val=0):
                 return 1
             return 0
 
-        # Threads Kontrolü
         elif p_type == "threads":
             resp = requests.get(page_info["url"], headers=HEADERS, timeout=10)
             if not resp or resp.status_code != 200:
                 return current_state_val if current_state_val is not None else default_val
 
-            matches = re.findall(r'THREADS\s*(\d+)', resp.text, re.IGNORECASE)
+            text = BeautifulSoup(resp.text, "html.parser").get_text()
+
+            # 1. Önceden hatasız çalışan doğrudan THREADS sayaç regexi
+            matches = re.findall(r'THREADS\s*[:\s]?\s*(\d+)', text, re.IGNORECASE)
             if matches:
-                return int(matches[0])
-            numbers = [int(n) for n in re.findall(r'\b\d+\b', resp.text) if len(n) <= 4]
-            if numbers:
-                return max(numbers)
+                val = int(matches[0])
+                if val not in (2025, 2026, 2027):
+                    return val
+
+            # 2. Ters kalıp: "X Threads"
+            matches_alt = re.findall(r'(\d+)\s+threads', text, re.IGNORECASE)
+            if matches_alt:
+                val = int(matches_alt[0])
+                if val not in (2025, 2026, 2027):
+                    return val
+
+            # 3. Yıl hatasına düşmemek için eski 2026 değerini temizle
+            if current_state_val in (2025, 2026, 2027):
+                return default_val
+            return current_state_val if current_state_val is not None else default_val
 
         return current_state_val if current_state_val is not None else default_val
     except Exception:
@@ -209,7 +218,7 @@ def handle_callback(callback_data, chat_id):
         send_telegram_message("\n".join(lines), reply_markup=get_inline_keyboard())
 
     elif callback_data == "btn_kontrol":
-        send_telegram_message("🔎 Canlı API sorgulaması yapılıyor...")
+        send_telegram_message("🔎 Canlı kontrol başlatıldı...")
         run_check()
         send_telegram_message("✅ Canlı kontrol tamamlandı.", reply_markup=get_inline_keyboard())
 
@@ -232,6 +241,7 @@ def handle_message(text, chat_id):
 
     text_clean = text.strip()
 
+    # İstediğin sayacı elle eşitleme: /set sillagunerr_threads 12 gibi
     if text_clean.startswith("/set "):
         parts = text_clean.split()
         if len(parts) == 3 and parts[2].isdigit():
@@ -239,7 +249,7 @@ def handle_message(text, chat_id):
             current_state = load_state()
             current_state[k] = v
             save_state(current_state)
-            send_telegram_message(f"✅ {k} değeri {v} olarak ayarlandı.")
+            send_telegram_message(f"✅ {k} taban değeri {v} olarak ayarlandı.")
             return
 
     if "durum" in text_clean.lower() or text_clean == "/durum":
@@ -252,7 +262,7 @@ def handle_message(text, chat_id):
         return
 
     if text_clean in ["/start", "/yardim", "anasayfa"]:
-        send_telegram_message("👋 Bot aktif!", reply_markup=get_inline_keyboard())
+        send_telegram_message("👋 Bot aktif! Kontrol paneli hazır:", reply_markup=get_inline_keyboard())
 
 def listen_telegram():
     try:
@@ -303,21 +313,23 @@ def listen_telegram():
         time.sleep(0.5)
 
 def main():
-    print("Canlı API Tabanlı Takip Botu Başlatıldı...")
+    print("Master Takip Botu Başlatıldı...")
 
     current_state = load_state()
     for key, info in PAGES.items():
         if key not in current_state:
             current_state[key] = info.get("default_val", 0)
 
-    # Sillagunerrr'ı 6 olarak eşitle
-    current_state["sillagunerrr_reposts"] = 6
+    # Hafızada kalmış hatalı 2026/2025 değerini temizle
+    if current_state.get("sillagunerr_threads") in (2025, 2026, 2027):
+        current_state["sillagunerr_threads"] = 0
+
     save_state(current_state)
 
     t = threading.Thread(target=listen_telegram, daemon=True)
     t.start()
 
-    send_telegram_message("🚀 Bot API Modunda Başlatıldı!", reply_markup=get_inline_keyboard())
+    send_telegram_message("🚀 Bot Başlatıldı! Sayaçlar temizlendi ve güncellendi.", reply_markup=get_inline_keyboard())
 
     while True:
         run_check()
