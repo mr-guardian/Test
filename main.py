@@ -69,6 +69,8 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache"
 }
 
 LAST_AUDIT_REPORT = {}
@@ -122,39 +124,41 @@ def fetch_url(url, custom_headers=None):
 
 
 def fetch_repost_via_api(username):
-    """Canlı API modunda TikTok kullanıcı akışını doğrudan sorgular."""
+    """Viewoo tRPC dahili API'si ve TikTok JSON hydration ayrıştırması."""
+    # 1. Viewoo tRPC Dahili Çözümleyici
     try:
-        # TikTok Node Share Uç Noktası
-        u_url = f"https://www.tiktok.com/node/share/user/@{username}"
-        r = fetch_url(u_url, {"User-Agent": HEADERS["User-Agent"], "Accept": "application/json"})
-        if r and r.status_code == 200 and r.text.strip().startswith("{"):
+        trpc_url = f"https://viewoo.co/api/trpc/user.getReposts?input=%7B%22json%22%3A%7B%22username%22%3A%22{username}%22%7D%7D"
+        r = fetch_url(trpc_url, {"User-Agent": HEADERS["User-Agent"], "Accept": "application/json"})
+        if r and r.status_code == 200:
             data = r.json()
-            user_info = data.get("userInfo", {}).get("stats", {})
-            for k in ["repostCount", "repost_count"]:
-                if k in user_info and user_info[k] > 0:
-                    return user_info[k], "TikTok Node API"
+            items = data.get("result", {}).get("data", {}).get("json", {}).get("items", [])
+            if isinstance(items, list) and len(items) > 0:
+                return len(items), f"Viewoo tRPC API ({len(items)} Repost)"
     except Exception:
         pass
 
+    # 2. TikTok Web JSON Hydration Bloğu
     try:
-        # TikWM Yedek Servisi
-        api_url = f"https://www.tikwm.com/api/user/posts?unique_id={username}&count=30"
-        r = requests.get(api_url, headers=HEADERS, timeout=8)
-        if r.status_code == 200 and r.text.strip().startswith("{"):
-            data = r.json()
-            if data.get("code") == 0 and "data" in data:
-                videos = data["data"].get("videos", [])
-                reposts = [v for v in videos if v.get("is_repost") is True or "repost" in str(v).lower()]
-                if len(reposts) > 0:
-                    return len(reposts), "TikWM API"
+        ts = int(time.time())
+        prof_url = f"https://www.tiktok.com/@{username}?_={ts}"
+        r_prof = fetch_url(prof_url)
+        if r_prof and r_prof.status_code == 200:
+            m = re.search(r'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>', r_prof.text, re.DOTALL)
+            if m:
+                u_data = json.loads(m.group(1))
+                scope = u_data.get("__DEFAULT_SCOPE__", {})
+                user_detail = scope.get("webapp.user-detail", {})
+                stats = user_detail.get("userInfo", {}).get("stats", {})
+                if "repostCount" in stats and stats["repostCount"] > 0:
+                    return stats["repostCount"], "TikTok Hydration Sayacı"
     except Exception:
         pass
 
-    return None, "API yanıtı boş döndü"
+    return None, "API yanıt vermedi veya liste gizli"
 
 
 def fetch_repost_via_scraper(username, viewoo_url):
-    """Web kazıma modunda Viewoo Next.js RSC verisini ve kartları tarar."""
+    """Viewoo Next.js RSC ve HTML kart sayımı."""
     try:
         ts = int(time.time())
         v_url = f"{viewoo_url}&_t={ts}" if "?" in viewoo_url else f"{viewoo_url}?_t={ts}"
@@ -423,14 +427,13 @@ def main():
         if key not in current_state:
             current_state[key] = info.get("default_val", 0)
 
-    # Threads sayısını 122 olarak doğrula
     current_state["sillagunerr_threads"] = 122
     save_state(current_state)
 
     t = threading.Thread(target=listen_telegram, daemon=True)
     t.start()
 
-    send_telegram_message("🚀 Bot Başlatıldı! Kontrol paneli güncellendi.", reply_markup=get_inline_keyboard())
+    send_telegram_message("🚀 Bot Başlatıldı! tRPC ve Hydration motoru aktif.", reply_markup=get_inline_keyboard())
 
     while True:
         run_check()
