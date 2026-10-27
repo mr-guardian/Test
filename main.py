@@ -75,21 +75,20 @@ def send_telegram_message(text, reply_markup=None):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": text[:4000],
+        "text": str(text)[:4000],
         "disable_notification": SILENT_MODE
     }
     if reply_markup:
         payload["reply_markup"] = reply_markup
     try:
-        requests.post(url, json=payload, timeout=10)
+        requests.post(url, json=payload, timeout=8)
     except Exception as e:
         print(f"[!] Gönderim hatası: {e}")
 
 def get_live_repost_count(username):
-    """TikTok profil verilerinden gerçek repost sayısını çeker."""
     try:
         api_url = f"https://www.tikwm.com/api/user/posts?unique_id={username}&count=30"
-        resp = requests.get(api_url, headers=HEADERS, timeout=10).json()
+        resp = requests.get(api_url, headers=HEADERS, timeout=8).json()
         
         if resp.get("code") == 0 and "data" in resp:
             videos = resp["data"].get("videos", [])
@@ -98,7 +97,7 @@ def get_live_repost_count(username):
                 return len(reposts)
 
         alt_api = f"https://countik.com/api/userinfo/{username}"
-        r_alt = requests.get(alt_api, headers=HEADERS, timeout=10).json()
+        r_alt = requests.get(alt_api, headers=HEADERS, timeout=8).json()
         if "reposts" in r_alt:
             return int(r_alt["reposts"])
             
@@ -120,7 +119,7 @@ def check_page_count(page_info, current_state_val=0):
             return current_state_val if (current_state_val is not None and current_state_val > 0) else default_val
 
         elif p_type == "story":
-            resp = requests.get(page_info["url"], headers=HEADERS, timeout=10)
+            resp = requests.get(page_info["url"], headers=HEADERS, timeout=8)
             if not resp or resp.status_code != 200:
                 return current_state_val if current_state_val is not None else default_val
 
@@ -137,27 +136,24 @@ def check_page_count(page_info, current_state_val=0):
             return 0
 
         elif p_type == "threads":
-            resp = requests.get(page_info["url"], headers=HEADERS, timeout=10)
+            resp = requests.get(page_info["url"], headers=HEADERS, timeout=8)
             if not resp or resp.status_code != 200:
                 return current_state_val if current_state_val is not None else default_val
 
             text = BeautifulSoup(resp.text, "html.parser").get_text()
 
-            # 1. Önceden hatasız çalışan doğrudan THREADS sayaç regexi
             matches = re.findall(r'THREADS\s*[:\s]?\s*(\d+)', text, re.IGNORECASE)
             if matches:
                 val = int(matches[0])
                 if val not in (2025, 2026, 2027):
                     return val
 
-            # 2. Ters kalıp: "X Threads"
             matches_alt = re.findall(r'(\d+)\s+threads', text, re.IGNORECASE)
             if matches_alt:
                 val = int(matches_alt[0])
                 if val not in (2025, 2026, 2027):
                     return val
 
-            # 3. Yıl hatasına düşmemek için eski 2026 değerini temizle
             if current_state_val in (2025, 2026, 2027):
                 return default_val
             return current_state_val if current_state_val is not None else default_val
@@ -211,7 +207,7 @@ def handle_callback(callback_data, chat_id):
 
     if callback_data == "btn_durum":
         current_state = load_state()
-        lines = ["📑 Takip Edilen Sayfalar:\n"]
+        lines = ["📑 Takip Edilen Sayfalar Güncel Durumu:\n"]
         for key, info in PAGES.items():
             val = current_state.get(key, info.get("default_val", 0))
             lines.append(f"• {info['name']}: {val}")
@@ -241,7 +237,6 @@ def handle_message(text, chat_id):
 
     text_clean = text.strip()
 
-    # İstediğin sayacı elle eşitleme: /set sillagunerr_threads 12 gibi
     if text_clean.startswith("/set "):
         parts = text_clean.split()
         if len(parts) == 3 and parts[2].isdigit():
@@ -249,12 +244,13 @@ def handle_message(text, chat_id):
             current_state = load_state()
             current_state[k] = v
             save_state(current_state)
-            send_telegram_message(f"✅ {k} taban değeri {v} olarak ayarlandı.")
+            send_telegram_message(f"✅ {k} taban değeri {v} olarak ayarlandı.", reply_markup=get_inline_keyboard())
             return
 
-    if "durum" in text_clean.lower() or text_clean == "/durum":
+    text_lower = text_clean.lower()
+    if "durum" in text_lower or text_lower == "/durum":
         current_state = load_state()
-        lines = ["📑 Takip Edilen Sayfalar:\n"]
+        lines = ["📑 Takip Edilen Sayfalar Güncel Durumu:\n"]
         for key, info in PAGES.items():
             val = current_state.get(key, info.get("default_val", 0))
             lines.append(f"• {info['name']}: {val}")
@@ -266,7 +262,7 @@ def handle_message(text, chat_id):
 
 def listen_telegram():
     try:
-        requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=True", timeout=10)
+        requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=True", timeout=5)
     except Exception:
         pass
 
@@ -276,41 +272,46 @@ def listen_telegram():
         try:
             resp = requests.get(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
-                params={"offset": last_update_id + 1, "timeout": 20, "limit": 10},
-                timeout=25
+                params={"offset": last_update_id + 1, "timeout": 15, "limit": 10},
+                timeout=20
             ).json()
 
             if resp.get("ok"):
                 for item in resp.get("result", []):
                     last_update_id = item["update_id"]
 
-                    msg = item.get("message", {})
-                    text = msg.get("text", "").strip()
-                    chat_id = str(msg.get("chat", {}).get("id", ""))
-                    if text and chat_id:
-                        handle_message(text, chat_id)
-
+                    # 1. Callback (Buton) Olayları
                     callback_query = item.get("callback_query")
                     if callback_query:
                         cb_data = callback_query.get("data")
                         cb_chat_id = str(callback_query.get("message", {}).get("chat", {}).get("id", ""))
                         cb_id = callback_query.get("id")
+
+                        # Telegram'a tıklandığı anında onaylatılır (Yükleniyor çarkı takılmaz)
                         try:
                             requests.post(
                                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
                                 json={"callback_query_id": cb_id},
-                                timeout=5
+                                timeout=4
                             )
                         except Exception:
                             pass
 
                         if cb_data and cb_chat_id == str(TELEGRAM_CHAT_ID):
                             handle_callback(cb_data, cb_chat_id)
+                        continue
+
+                    # 2. Normal Metin Mesajları
+                    msg = item.get("message", {})
+                    text = msg.get("text", "").strip()
+                    chat_id = str(msg.get("chat", {}).get("id", ""))
+                    if text and chat_id:
+                        handle_message(text, chat_id)
 
         except Exception as e:
-            time.sleep(3)
+            time.sleep(2)
 
-        time.sleep(0.5)
+        time.sleep(0.3)
 
 def main():
     print("Master Takip Botu Başlatıldı...")
@@ -320,7 +321,7 @@ def main():
         if key not in current_state:
             current_state[key] = info.get("default_val", 0)
 
-    # Hafızada kalmış hatalı 2026/2025 değerini temizle
+    # 2026 kalıntısını sıfırla
     if current_state.get("sillagunerr_threads") in (2025, 2026, 2027):
         current_state["sillagunerr_threads"] = 0
 
@@ -329,7 +330,7 @@ def main():
     t = threading.Thread(target=listen_telegram, daemon=True)
     t.start()
 
-    send_telegram_message("🚀 Bot Başlatıldı! Sayaçlar temizlendi ve güncellendi.", reply_markup=get_inline_keyboard())
+    send_telegram_message("🚀 Bot Başlatıldı! Butonlar yenilendi ve aktif.", reply_markup=get_inline_keyboard())
 
     while True:
         run_check()
