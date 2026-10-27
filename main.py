@@ -24,18 +24,21 @@ PAGES = {
     },
     "sillagunerrr_reposts": {
         "username": "sillagunerrr",
+        "view_url": "https://viewoo.co/u/sillagunerrr?tab=reposts",
         "name": "sillagunerrr Repostlar",
         "type": "viewoo_reposts",
         "default_val": 6
     },
     "userr44559014_reposts": {
         "username": "userr44559014",
+        "view_url": "https://viewoo.co/u/userr44559014?tab=reposts",
         "name": "userr44559014 Repostlar",
         "type": "viewoo_reposts",
         "default_val": 1
     },
     "emin_htp_reposts": {
         "username": "emin_htp",
+        "view_url": "https://viewoo.co/u/emin_htp?tab=reposts",
         "name": "emin_htp Repostlar",
         "type": "viewoo_reposts",
         "default_val": 11
@@ -94,7 +97,7 @@ def send_telegram_message(text, reply_markup=None):
 
 
 def fetch_viewoo_reposts(username):
-    """Viewoo API üzerinden kesin repost sayısını alır."""
+    """Viewoo API üzerinden net repost sayısını alır."""
     ts = int(time.time())
     url = f"https://viewoo.co/api/reposts?username={username}&_={ts}"
     try:
@@ -102,11 +105,9 @@ def fetch_viewoo_reposts(username):
         if resp.status_code == 200:
             data = resp.json()
 
-            # Liste formatı
             if isinstance(data, list):
                 return len(data), f"API Listesi ({len(data)} Repost)"
 
-            # Sözlük / Nesne formatı
             if isinstance(data, dict):
                 for k in ["items", "reposts", "data", "videos", "posts"]:
                     if k in data and isinstance(data[k], list):
@@ -114,7 +115,6 @@ def fetch_viewoo_reposts(username):
                 if "count" in data and isinstance(data["count"], int):
                     return data["count"], f"API Sayacı ({data['count']})"
 
-            # Ham JSON içinde 19 haneli video ID'leri
             ids = set(re.findall(r'\b7\d{18}\b', json.dumps(data)))
             if len(ids) > 0:
                 return len(ids), f"API Video ID ({len(ids)} Repost)"
@@ -163,7 +163,7 @@ def check_page_count(key, page_info, current_state_val=0):
             LAST_AUDIT_REPORT[key] = "✅ Araştırıldı (Hikaye Yok)"
             return 0
 
-        # 3. Threadlook Threads Takibi
+        # 3. Threads Takibi
         elif p_type == "threads":
             resp = requests.get(page_info["url"], headers=HEADERS, timeout=8)
             if not resp or resp.status_code != 200:
@@ -172,7 +172,6 @@ def check_page_count(key, page_info, current_state_val=0):
 
             text = BeautifulSoup(resp.text, "html.parser").get_text()
 
-            # "THREADS 122" veya "122 threads" kalıbı (2025/2026 yılları filtrelenir)
             m = re.findall(r'THREADS\s*[:\s]?\s*(\d+)', text, re.IGNORECASE)
             if m and int(m[0]) not in (2025, 2026, 2027):
                 LAST_AUDIT_REPORT[key] = "✅ Araştırıldı (THREADS Sayacı Doğrulandı)"
@@ -214,6 +213,7 @@ def run_check():
 
     current_state = load_state()
     changes = []
+    change_buttons = []
 
     for key, info in PAGES.items():
         old_val = current_state.get(key, -1)
@@ -225,14 +225,19 @@ def run_check():
 
         if count != old_val:
             fark = count - old_val
-            changes.append(f"• {info['name']}: {old_val} ➔ {count} ({fark:+d})")
+            target_url = info.get("view_url") or info.get("url", "https://viewoo.co")
+            
+            changes.append(f"• {info['name']}: {old_val} ➔ {count} ({fark:+d})\n  🔗 Görsel/İçerik Linki: {target_url}")
+            change_buttons.append([{"text": f"🔗 {info['name']} Görüntüle", "url": target_url}])
             current_state[key] = count
 
     save_state(current_state)
 
     if changes:
-        msg = "🔔 İçerik Değişikliği Algılandı!\n\n" + "\n".join(changes)
-        send_telegram_message(msg, reply_markup=get_inline_keyboard())
+        # Normal kontrol butonlarını link butonlarının altına ekle
+        custom_keyboard = {"inline_keyboard": change_buttons + get_inline_keyboard()["inline_keyboard"]}
+        msg = "🔔 İçerik Değişikliği Algılandı!\n\n" + "\n\n".join(changes)
+        send_telegram_message(msg, reply_markup=custom_keyboard)
 
 
 def get_status_report_text():
@@ -279,7 +284,6 @@ def handle_message(text, chat_id):
 
     text_clean = text.strip()
 
-    # /set komutu ile istenirse manuel değer atama
     if text_clean.startswith("/set "):
         parts = text_clean.split()
         if len(parts) == 3 and parts[2].isdigit():
@@ -362,7 +366,7 @@ def main():
     t = threading.Thread(target=listen_telegram, daemon=True)
     t.start()
 
-    send_telegram_message("🚀 Bot Başlatıldı! Temiz ve optimize edilmiş sürüm devrede.", reply_markup=get_inline_keyboard())
+    send_telegram_message("🚀 Bot Başlatıldı! Link bildirim sistemi aktif.", reply_markup=get_inline_keyboard())
 
     while True:
         run_check()
