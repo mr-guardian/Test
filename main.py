@@ -22,7 +22,6 @@ TELEGRAM_CHAT_ID = "6009524525"
 CHECK_INTERVAL_SECONDS = 900
 IS_TRACKING_PAUSED = False
 SILENT_MODE = False
-USE_API_MODE = False  # Doğrudan çalışan Web Kazıma modunu varsayılan yapıyoruz
 
 STATE_FILE = "tracker_state.json"
 
@@ -34,27 +33,21 @@ PAGES = {
         "default_val": 0
     },
     "sillagunerrr_reposts": {
-        "url": "https://www.tiktok.com/@sillagunerrr",
-        "viewoo_url": "https://viewoo.co/u/sillagunerrr?tab=reposts",
         "username": "sillagunerrr",
         "name": "sillagunerrr Repostlar",
-        "type": "repost",
+        "type": "viewoo_api_reposts",
         "default_val": 6
     },
     "userr44559014_reposts": {
-        "url": "https://www.tiktok.com/@userr44559014",
-        "viewoo_url": "https://viewoo.co/u/userr44559014?tab=reposts",
         "username": "userr44559014",
         "name": "userr44559014 Repostlar",
-        "type": "repost",
+        "type": "viewoo_api_reposts",
         "default_val": 1
     },
     "emin_htp_reposts": {
-        "url": "https://www.tiktok.com/@emin_htp",
-        "viewoo_url": "https://viewoo.co/u/emin_htp?tab=reposts",
         "username": "emin_htp",
         "name": "emin_htp Repostlar",
-        "type": "repost",
+        "type": "viewoo_api_reposts",
         "default_val": 11
     },
     "sillagunerr_threads": {
@@ -67,8 +60,9 @@ PAGES = {
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept": "application/json, text/plain, */*",
     "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Referer": "https://viewoo.co/",
     "Cache-Control": "no-cache",
     "Pragma": "no-cache"
 }
@@ -77,7 +71,6 @@ LAST_AUDIT_REPORT = {}
 
 
 def get_inline_keyboard():
-    mod_text = "⚡ Mod: Canlı API" if USE_API_MODE else "🌐 Mod: Web Kazıma"
     return {
         "inline_keyboard": [
             [
@@ -85,7 +78,6 @@ def get_inline_keyboard():
                 {"text": "🔍 Canlı Kontrol", "callback_data": "btn_kontrol"}
             ],
             [
-                {"text": mod_text, "callback_data": "btn_toggle_mode"},
                 {"text": "🔕 Sessiz Mod", "callback_data": "btn_sessiz"}
             ],
             [
@@ -123,81 +115,40 @@ def fetch_url(url, custom_headers=None):
         return None
 
 
-def fetch_repost_via_api(username):
-    """Açık API köprüleri üzerinden repost kontrolü."""
-    try:
-        # TikWM v2 video sorgusu
-        api_url = f"https://www.tikwm.com/api/user/posts?unique_id={username}&count=35"
-        r = requests.get(api_url, headers=HEADERS, timeout=8)
-        if r.status_code == 200 and r.text.strip().startswith("{"):
-            data = r.json()
-            if data.get("code") == 0 and "data" in data:
-                videos = data["data"].get("videos", [])
-                reposts = [v for v in videos if v.get("is_repost") is True or "repost" in str(v).lower()]
-                if len(reposts) > 0:
-                    return len(reposts), f"TikWM API ({len(reposts)} Repost)"
-    except Exception:
-        pass
+def fetch_viewoo_api_reposts(username):
+    """Viewoo resmi repost API'si üzerinden net repost sayısını çeker."""
+    ts = int(time.time())
+    api_url = f"https://viewoo.co/api/reposts?username={username}&_={ts}"
+    resp = fetch_url(api_url)
 
-    try:
-        # Countik kullanıcı istatistikleri
-        alt_url = f"https://countik.com/api/userinfo/{username}"
-        r_alt = requests.get(alt_url, headers=HEADERS, timeout=8)
-        if r_alt.status_code == 200 and r_alt.text.strip().startswith("{"):
-            d_alt = r_alt.json()
-            if "reposts" in d_alt and int(d_alt["reposts"]) > 0:
-                return int(d_alt["reposts"]), "Countik API"
-    except Exception:
-        pass
+    if resp and resp.status_code == 200:
+        try:
+            data = resp.json()
 
-    return None, "API yanıtı boş veya engelli"
+            # 1. Eğer doğrudan liste dönüyorsa: [ {...}, {...} ]
+            if isinstance(data, list):
+                return len(data), f"Viewoo API Listesi ({len(data)} Repost)"
 
+            # 2. Eğer sözlük formatında items/reposts alanı varsa
+            if isinstance(data, dict):
+                for k in ["items", "reposts", "data", "videos", "posts"]:
+                    if k in data and isinstance(data[k], list):
+                        return len(data[k]), f"Viewoo API ({k}: {len(data[k])} Repost)"
+                if "count" in data and isinstance(data["count"], int):
+                    return data["count"], f"Viewoo API Sayacı ({data['count']})"
+                if "total" in data and isinstance(data["total"], int):
+                    return data["total"], f"Viewoo API Toplamı ({data['total']})"
 
-def fetch_repost_via_scraper(username, viewoo_url):
-    """Viewoo Next.js RSC ve sayfa gövdesindeki video kimliklerini eksiksiz ayıklar."""
-    try:
-        ts = int(time.time())
-        
-        # 1. Next.js Flight Payload / RSC İsteği
-        rsc_headers = {
-            "User-Agent": HEADERS["User-Agent"],
-            "RSC": "1",
-            "Next-Router-State-Tree": "%5B%22%22%2C%7B%22children%22%3A%5B%22(main)%22%2C%7B%22children%22%3A%5B%22u%22%2C%7B%22children%22%3A%5B%22" + username + "%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%5D%7D%5D%7D%5D%7D%5D%7D%2Cnull%2Cnull%2Ctrue%5D",
-            "Next-Url": f"/u/{username}?tab=reposts"
-        }
-        v_url = f"https://viewoo.co/u/{username}?tab=reposts&_t={ts}"
-        resp = fetch_url(v_url, rsc_headers)
-        
-        if resp and resp.status_code == 200:
-            text = resp.text
-            # 19 haneli TikTok video/aweme ID kalıbı
-            ids = set(re.findall(r'\b7\d{18}\b', text))
-            # Veya video link kalıpları: /video/7...
-            video_links = set(re.findall(r'/video/(7\d{18})', text))
-            all_ids = ids.union(video_links)
-            
-            if len(all_ids) > 0:
-                return len(all_ids), f"Viewoo RSC ({len(all_ids)} Video/Repost Bulundu)"
+            # 3. JSON içindeki 19 haneli video ID kalıpları
+            raw_text = json.dumps(data)
+            ids = set(re.findall(r'\b7\d{18}\b', raw_text))
+            if len(ids) > 0:
+                return len(ids), f"Viewoo API Ham ID ({len(ids)} Repost)"
 
-        # 2. Standart HTML Çözümleme
-        resp_html = fetch_url(f"https://viewoo.co/u/{username}?tab=reposts")
-        if resp_html and resp_html.status_code == 200:
-            html_text = resp_html.text
-            soup = BeautifulSoup(html_text, "html.parser")
-            
-            # Repost kartları veya video kutuları
-            cards = soup.select("[data-video-id], a[href*='/video/'], div[class*='repost'], div[class*='post']")
-            valid_cards = [c for c in cards if "avatar" not in (c.get("class") or [])]
-            if len(valid_cards) > 1:
-                return len(valid_cards), f"Viewoo HTML Kartları ({len(valid_cards)} Adet)"
-            
-            ids_html = set(re.findall(r'\b7\d{18}\b', html_text))
-            if len(ids_html) > 0:
-                return len(ids_html), f"HTML İçerik ID ({len(ids_html)} Adet)"
+        except Exception as e:
+            return None, f"JSON Ayrıştırma Hatası: {str(e)[:25]}"
 
-        return None, "Sayfa tarandı fakat video ID'si eşleşmedi"
-    except Exception as e:
-        return None, f"Kazıma Hatası: {str(e)[:25]}"
+    return None, f"API Yanıtı Başarısız (HTTP {resp.status_code if resp else 'None'})"
 
 
 def check_page_count(key, page_info, current_state_val=0):
@@ -206,21 +157,16 @@ def check_page_count(key, page_info, current_state_val=0):
     default_val = page_info.get("default_val", 0)
 
     try:
-        if p_type == "repost":
+        if p_type == "viewoo_api_reposts":
             username = page_info["username"]
-            if USE_API_MODE:
-                count, detail = fetch_repost_via_api(username)
-                mod_name = "Canlı API"
-            else:
-                count, detail = fetch_repost_via_scraper(username, page_info.get("viewoo_url", ""))
-                mod_name = "Web Kazıma"
+            count, detail = fetch_viewoo_api_reposts(username)
 
-            if count is not None and count > 0:
-                LAST_AUDIT_REPORT[key] = f"✅ Araştırıldı ({mod_name}) - {detail}"
+            if count is not None:
+                LAST_AUDIT_REPORT[key] = f"✅ Araştırıldı - {detail}"
                 return count
             else:
-                fallback_val = current_state_val if (current_state_val is not None and current_state_val > 0) else default_val
-                LAST_AUDIT_REPORT[key] = f"⚠️ Araştırıldı ({mod_name}) - Taban korundu ({detail})"
+                fallback_val = current_state_val if (current_state_val is not None) else default_val
+                LAST_AUDIT_REPORT[key] = f"⚠️ Araştırıldı - {detail} (Taban Korundu)"
                 return fallback_val
 
         elif p_type == "story":
@@ -320,9 +266,7 @@ def run_check():
 
 def get_status_report_text():
     current_state = load_state()
-    mod_str = "⚡ Canlı API Modu" if USE_API_MODE else "🌐 Web Kazıma (Scraper) Modu"
-
-    lines = [f"📊 GÜNCEL DURUM VE ARAŞTIRMA RAPORU\nAktif Çalışma Modu: {mod_str}\n"]
+    lines = ["📊 GÜNCEL DURUM VE ARAŞTIRMA RAPORU\nKaynak: Viewoo Doğrudan API\n"]
     for key, info in PAGES.items():
         val = current_state.get(key, info.get("default_val", 0))
         audit = LAST_AUDIT_REPORT.get(key, "Henüz canlı taranmadı")
@@ -332,24 +276,16 @@ def get_status_report_text():
 
 
 def handle_callback(callback_data, chat_id):
-    global IS_TRACKING_PAUSED, SILENT_MODE, USE_API_MODE
+    global IS_TRACKING_PAUSED, SILENT_MODE
 
     if callback_data == "btn_durum":
         send_telegram_message(get_status_report_text(), reply_markup=get_inline_keyboard())
 
     elif callback_data == "btn_kontrol":
-        send_telegram_message("🔎 Canlı tarama ve doğrulama başlatıldı...")
+        send_telegram_message("🔎 Doğrudan Viewoo API sorgulaması başlatıldı...")
         run_check()
         send_telegram_message(
             "✅ Kontrol tamamlandı!\n\n" + get_status_report_text(),
-            reply_markup=get_inline_keyboard()
-        )
-
-    elif callback_data == "btn_toggle_mode":
-        USE_API_MODE = not USE_API_MODE
-        yeni_mod = "⚡ Canlı API Modu" if USE_API_MODE else "🌐 Web Kazıma (Scraper) Modu"
-        send_telegram_message(
-            f"🔄 Çalışma Modu Değiştirildi!\nŞu anki mod: **{yeni_mod}**\n\n'Canlı Kontrol' butonuna basarak kontrol edebilirsin.",
             reply_markup=get_inline_keyboard()
         )
 
@@ -444,20 +380,19 @@ def listen_telegram():
 
 
 def main():
-    print("Master Takip Botu Başlatıldı...")
+    print("Doğrudan Viewoo API Tabanlı Master Takip Botu Başlatıldı...")
 
     current_state = load_state()
     for key, info in PAGES.items():
         if key not in current_state:
             current_state[key] = info.get("default_val", 0)
 
-    current_state["sillagunerr_threads"] = 122
     save_state(current_state)
 
     t = threading.Thread(target=listen_telegram, daemon=True)
     t.start()
 
-    send_telegram_message("🚀 Bot Başlatıldı! Gelişmiş RSC kazıma motoru aktif.", reply_markup=get_inline_keyboard())
+    send_telegram_message("🚀 Bot Başlatıldı! Viewoo API doğrudan bağlandı.", reply_markup=get_inline_keyboard())
 
     while True:
         run_check()
