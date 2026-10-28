@@ -123,7 +123,6 @@ def send_telegram_message(text, reply_markup=None):
 
 
 def send_telegram_photo(photo_url, caption=""):
-    """Yeni içeriğin kapak görselini doğrudan sohbet penceresine gönderir."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID or not photo_url:
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
@@ -140,10 +139,8 @@ def send_telegram_photo(photo_url, caption=""):
 
 
 def fetch_viewoo_reposts(username):
-    """Viewoo API üzerinden repost sayısını ve en son videonun kapak resmini alır."""
     ts = int(time.time())
     url = f"https://viewoo.co/api/reposts?username={username}&_={ts}"
-    latest_cover = None
     try:
         resp = requests.get(url, headers=HEADERS, timeout=8)
         if resp.status_code == 200:
@@ -158,29 +155,19 @@ def fetch_viewoo_reposts(username):
                         items_list = data[k]
                         break
 
-            # Kapak görseli ayıklama
-            if items_list and isinstance(items_list[0], dict):
-                first_item = items_list[0]
-                latest_cover = (
-                    first_item.get("cover")
-                    or first_item.get("dynamic_cover")
-                    or first_item.get("cover_image_url")
-                    or first_item.get("thumbnail")
-                )
-
             if items_list:
-                return len(items_list), f"API Listesi ({len(items_list)} Repost)", latest_cover
+                return len(items_list), f"API Listesi ({len(items_list)} Repost)"
 
             if isinstance(data, dict) and "count" in data and isinstance(data["count"], int):
-                return data["count"], f"API Sayacı ({data['count']})", None
+                return data["count"], f"API Sayacı ({data['count']})"
 
             ids = set(re.findall(r'\b7\d{18}\b', json.dumps(data)))
             if len(ids) > 0:
-                return len(ids), f"API Video ID ({len(ids)} Repost)", None
+                return len(ids), f"API Video ID ({len(ids)} Repost)"
 
-        return None, f"HTTP {resp.status_code}", None
+        return None, f"HTTP {resp.status_code}"
     except Exception as e:
-        return None, f"Hata: {str(e)[:25]}", None
+        return None, f"Hata: {str(e)[:25]}"
 
 
 def check_page_count(key, page_info, current_state_val=0):
@@ -190,67 +177,90 @@ def check_page_count(key, page_info, current_state_val=0):
 
     try:
         if p_type == "viewoo_reposts":
-            count, detail, cover_url = fetch_viewoo_reposts(page_info["username"])
+            count, detail = fetch_viewoo_reposts(page_info["username"])
             if count is not None:
                 LAST_AUDIT_REPORT[key] = f"✅ Araştırıldı - {detail}"
-                return count, cover_url
+                return count, None, None
             else:
                 fallback = current_state_val if current_state_val is not None else default_val
                 LAST_AUDIT_REPORT[key] = f"⚠️ Araştırıldı - {detail} (Taban Korundu)"
-                return fallback, None
+                return fallback, None, None
 
         elif p_type == "story":
             resp = requests.get(page_info["url"], headers=HEADERS, timeout=8)
             if not resp or resp.status_code != 200:
                 LAST_AUDIT_REPORT[key] = "❌ Araştırılamadı (Sunucu yanıt vermedi)"
-                return (current_state_val if current_state_val is not None else default_val), None
+                return (current_state_val if current_state_val is not None else default_val), None, None
 
             text_lower = resp.text.lower()
             if any(p in text_lower for p in ("no active stories", "no stories", "0 stories", "hikaye yok")):
                 LAST_AUDIT_REPORT[key] = "✅ Araştırıldı (Hikaye Yok)"
-                return 0, None
+                return 0, None, None
 
             soup = BeautifulSoup(resp.text, "html.parser")
             story_items = soup.select("[data-story], [data-story-id], .story-item, a[href*='/story/']")
             
-            # İlk hikaye görselini yakalama denemesi
             story_img = None
             if story_items:
                 first_img = story_items[0].select_one("img")
                 if first_img and first_img.get("src"):
                     story_img = first_img["src"]
+                elif story_items[0].get("data-cover"):
+                    story_img = story_items[0]["data-cover"]
+
                 c = len(set(str(el) for el in story_items))
                 LAST_AUDIT_REPORT[key] = f"✅ Araştırıldı ({c} Aktif Hikaye)"
-                return c, story_img
+                return c, story_img, None
 
             LAST_AUDIT_REPORT[key] = "✅ Araştırıldı (Hikaye Yok)"
-            return 0, None
+            return 0, None, None
 
         elif p_type == "threads":
             resp = requests.get(page_info["url"], headers=HEADERS, timeout=8)
             if not resp or resp.status_code != 200:
                 LAST_AUDIT_REPORT[key] = "❌ Araştırılamadı"
-                return (current_state_val if current_state_val is not None else default_val), None
+                return (current_state_val if current_state_val is not None else default_val), None, None
 
-            text = BeautifulSoup(resp.text, "html.parser").get_text()
+            soup = BeautifulSoup(resp.text, "html.parser")
+            text = soup.get_text()
 
+            # En son paylaşılan Threads gönderi metnini yakalama
+            latest_post_text = None
+            post_selectors = [
+                ".thread-content", ".post-content", "[data-press-container]",
+                "div[class*='postText']", "div[class*='content']", "article"
+            ]
+            for sel in post_selectors:
+                elements = soup.select(sel)
+                for el in elements:
+                    cleaned = el.get_text().strip()
+                    if cleaned and len(cleaned) > 5 and not any(k in cleaned.lower() for k in ["threads", "followers", "following", "takipçi"]):
+                        latest_post_text = cleaned
+                        break
+                if latest_post_text:
+                    break
+
+            val = None
             m = re.findall(r'THREADS\s*[:\s]?\s*(\d+)', text, re.IGNORECASE)
             if m and int(m[0]) not in (2025, 2026, 2027):
-                LAST_AUDIT_REPORT[key] = "✅ Araştırıldı (THREADS Sayacı Doğrulandı)"
-                return int(m[0]), None
+                val = int(m[0])
 
-            m_alt = re.findall(r'(\d+)\s+threads', text, re.IGNORECASE)
-            if m_alt and int(m_alt[0]) not in (2025, 2026, 2027):
-                LAST_AUDIT_REPORT[key] = "✅ Araştırıldı (Alt Sayaç Doğrulandı)"
-                return int(m_alt[0]), None
+            if val is None:
+                m_alt = re.findall(r'(\d+)\s+threads', text, re.IGNORECASE)
+                if m_alt and int(m_alt[0]) not in (2025, 2026, 2027):
+                    val = int(m_alt[0])
+
+            if val is not None:
+                LAST_AUDIT_REPORT[key] = "✅ Araştırıldı (THREADS Sayacı Doğrulandı)"
+                return val, None, latest_post_text
 
             LAST_AUDIT_REPORT[key] = "✅ Araştırıldı (Sabit Değer Korundu)"
-            return (current_state_val if current_state_val is not None else default_val), None
+            return (current_state_val if current_state_val is not None else default_val), None, latest_post_text
 
-        return (current_state_val if current_state_val is not None else default_val), None
+        return (current_state_val if current_state_val is not None else default_val), None, None
     except Exception as e:
         LAST_AUDIT_REPORT[key] = f"❌ Hata: {str(e)[:25]}"
-        return (current_state_val if current_state_val is not None else default_val), None
+        return (current_state_val if current_state_val is not None else default_val), None, None
 
 
 def run_check():
@@ -262,11 +272,11 @@ def run_check():
     pages = get_pages()
     changes = []
     change_buttons = []
-    new_covers = []
+    new_story_covers = []
 
     for key, info in pages.items():
         old_val = current_state.get(key, -1)
-        count, cover_url = check_page_count(key, info, current_state_val=old_val)
+        count, cover_url, latest_text = check_page_count(key, info, current_state_val=old_val)
 
         if old_val == -1:
             current_state[key] = count
@@ -274,22 +284,28 @@ def run_check():
 
         if count != old_val:
             fark = count - old_val
-            target_url = info.get("view_url") or info.get("url", "https://viewoo.co")
+            target_url = info.get("view_url") or info.get("url", "https://threadlook.com")
             
-            changes.append(f"• {info['name']}: {old_val} ➔ {count} ({fark:+d})\n  🔗 Profil: {target_url}")
+            line = f"• {info['name']}: {old_val} ➔ {count} ({fark:+d})\n  🔗 Profil: {target_url}"
+
+            # Eğer Threads sayısı arttıysa ve son metin yakalandıysa mesaja ekle
+            if fark > 0 and info.get("type") == "threads" and latest_text:
+                preview = (latest_text[:280] + '...') if len(latest_text) > 280 else latest_text
+                line += f"\n  📝 Son Paylaşım: \"{preview}\""
+
+            changes.append(line)
             change_buttons.append([{"text": f"🔗 {info['name']} Görüntüle", "url": target_url}])
             
-            # Artış olduysa ve görsel adresi bulunduysa kaydet
-            if fark > 0 and cover_url:
-                new_covers.append((cover_url, f"📸 {info['name']} için yeni içerik kapağı!"))
+            # Sadece hikaye artışlarında kapak görseli
+            if fark > 0 and info.get("type") == "story" and cover_url:
+                new_story_covers.append((cover_url, f"📸 {info['name']} için yeni hikaye paylaşıldı!"))
 
             current_state[key] = count
 
     save_json(STATE_FILE, current_state)
 
     if changes:
-        # Önce kapak görsellerini gönder (Özellik 1)
-        for c_url, c_caption in new_covers:
+        for c_url, c_caption in new_story_covers:
             send_telegram_photo(c_url, caption=c_caption)
 
         custom_keyboard = {"inline_keyboard": change_buttons + get_inline_keyboard()["inline_keyboard"]}
@@ -349,7 +365,6 @@ def handle_message(text, chat_id):
 
     text_clean = text.strip()
 
-    # 1. Tarama Sıklığını Değiştirme Komutu: /aralik 10
     if text_clean.startswith("/aralik "):
         parts = text_clean.split()
         if len(parts) == 2 and parts[1].isdigit():
@@ -362,7 +377,6 @@ def handle_message(text, chat_id):
                 send_telegram_message("Aralık en az 1 dakika olmalıdır.")
                 return
 
-    # 2. Canlı Hedef Ekleme Komutu: /ekle repost kullanici_adi veya /ekle hikaye kullanici_adi
     if text_clean.startswith("/ekle "):
         parts = text_clean.split()
         if len(parts) == 3:
@@ -400,7 +414,6 @@ def handle_message(text, chat_id):
             send_telegram_message(f"✅ Yeni hedef başarıyla eklendi:\n• {pages[key]['name']}", reply_markup=get_inline_keyboard())
             return
 
-    # 3. Canlı Hedef Çıkarma Komutu: /cikar kullanici_adi veya /sil kullanici_adi
     if text_clean.startswith(("/cikar ", "/sil ")):
         parts = text_clean.split()
         if len(parts) == 2:
@@ -421,7 +434,6 @@ def handle_message(text, chat_id):
                 send_telegram_message(f"'{target}' ismini içeren bir hedef bulunamadı.")
                 return
 
-    # 4. Manuel Taban Değer Eşitleme: /set hedef deger
     if text_clean.startswith("/set "):
         parts = text_clean.split()
         if len(parts) == 3 and parts[2].isdigit():
@@ -438,7 +450,7 @@ def handle_message(text, chat_id):
 
     if text_clean in ["/start", "/yardim", "anasayfa"]:
         rehber = (
-            "👋 **Gelişmiş Takip Botu Komutları:**\n\n"
+            "👋 **Takip Botu Komutları:**\n\n"
             "⏱ **Tarama Sıklığı:**\n"
             "• `/aralik 5` ➔ Kontrol süresini 5 dakika yapar.\n\n"
             "🎯 **Hedef Yönetimi:**\n"
@@ -504,7 +516,7 @@ def listen_telegram():
 
 
 def main():
-    print("Kapak Görselli ve Dinamik Hedef Yönetimli Takip Botu Başlatıldı...")
+    print("Master Takip Botu Başlatıldı...")
 
     pages = get_pages()
     current_state = load_json(STATE_FILE, {})
@@ -517,7 +529,7 @@ def main():
     t = threading.Thread(target=listen_telegram, daemon=True)
     t.start()
 
-    send_telegram_message("🚀 Bot Başlatıldı! Kapak görseli ve canlı hedef yönetimi devrede.", reply_markup=get_inline_keyboard())
+    send_telegram_message("🚀 Bot Başlatıldı! Threads metin bildirim desteği devrede.", reply_markup=get_inline_keyboard())
 
     while True:
         run_check()
