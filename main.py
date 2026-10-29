@@ -3,6 +3,7 @@ import re
 import time
 import json
 import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 from bs4 import BeautifulSoup
 
@@ -60,6 +61,25 @@ HEADERS = {
 }
 
 LAST_AUDIT_REPORT = {}
+
+
+# --- FLY.IO İÇİN SAHTE WEB SUNUCUSU ---
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain; charset=utf-8')
+        self.end_headers()
+        self.wfile.write(b"Bot Aktif ve Calisiyor!")
+
+    def log_message(self, format, *args):
+        pass  # Terminali gereksiz loglarla doldurmasin
+
+
+def start_health_server():
+    """Fly.io'nun kapanmaması ve 8080 portunu onaylaması için web sunucusu."""
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    server.serve_forever()
 
 
 def load_json(filepath, default_val):
@@ -145,7 +165,6 @@ def fetch_viewoo_reposts(username):
         resp = requests.get(url, headers=HEADERS, timeout=8)
         if resp.status_code == 200:
             data = resp.json()
-
             items_list = []
             if isinstance(data, list):
                 items_list = data
@@ -224,7 +243,6 @@ def check_page_count(key, page_info, current_state_val=0):
             soup = BeautifulSoup(resp.text, "html.parser")
             text = soup.get_text()
 
-            # En son paylaşılan Threads gönderi metnini yakalama
             latest_post_text = None
             post_selectors = [
                 ".thread-content", ".post-content", "[data-press-container]",
@@ -288,7 +306,6 @@ def run_check():
             
             line = f"• {info['name']}: {old_val} ➔ {count} ({fark:+d})\n  🔗 Profil: {target_url}"
 
-            # Eğer Threads sayısı arttıysa ve son metin yakalandıysa mesaja ekle
             if fark > 0 and info.get("type") == "threads" and latest_text:
                 preview = (latest_text[:280] + '...') if len(latest_text) > 280 else latest_text
                 line += f"\n  📝 Son Paylaşım: \"{preview}\""
@@ -296,7 +313,6 @@ def run_check():
             changes.append(line)
             change_buttons.append([{"text": f"🔗 {info['name']} Görüntüle", "url": target_url}])
             
-            # Sadece hikaye artışlarında kapak görseli
             if fark > 0 and info.get("type") == "story" and cover_url:
                 new_story_covers.append((cover_url, f"📸 {info['name']} için yeni hikaye paylaşıldı!"))
 
@@ -515,6 +531,13 @@ def listen_telegram():
         time.sleep(0.3)
 
 
+def loop_tracker():
+    """Arka planda düzenli tarama döngüsü."""
+    while True:
+        run_check()
+        time.sleep(CHECK_INTERVAL_SECONDS)
+
+
 def main():
     print("Master Takip Botu Başlatıldı...")
 
@@ -526,14 +549,18 @@ def main():
 
     save_json(STATE_FILE, current_state)
 
-    t = threading.Thread(target=listen_telegram, daemon=True)
-    t.start()
+    # 1. Telegram dinleme thread'i
+    t_telegram = threading.Thread(target=listen_telegram, daemon=True)
+    t_telegram.start()
 
-    send_telegram_message("🚀 Bot Başlatıldı! Threads metin bildirim desteği devrede.", reply_markup=get_inline_keyboard())
+    # 2. Arka plan tarama thread'i
+    t_tracker = threading.Thread(target=loop_tracker, daemon=True)
+    t_tracker.start()
 
-    while True:
-        run_check()
-        time.sleep(CHECK_INTERVAL_SECONDS)
+    send_telegram_message("🚀 Bot Başlatıldı! Fly.io üzerinde aktif.", reply_markup=get_inline_keyboard())
+
+    # 3. Fly.io'nun kapanmaması için HTTP sunucusunu ana thread'de açık tut
+    start_health_server()
 
 
 if __name__ == "__main__":
