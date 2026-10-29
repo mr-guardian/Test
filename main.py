@@ -1,3 +1,22 @@
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, format, *args):
+        return  # Log kirliliği yapmasın
+
+def run_fake_server():
+    server = HTTPServer(('0.0.0.0', 8080), HealthCheckHandler)
+    server.serve_forever()
+
+# Arka planda 8080 portunu dinleyecek thread başlat:
+threading.Thread(target=run_fake_server, daemon=True).start()
+
 import os
 import re
 import time
