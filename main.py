@@ -7,7 +7,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 from bs4 import BeautifulSoup
 
-# --- RENDER PORT DİNLEYİCİSİ (PORT TIMEOUT HATASINI ENGELLER) ---
+# --- RENDER PORT DİNLEYİCİSİ ---
 class RenderHealthServer(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -16,18 +16,17 @@ class RenderHealthServer(BaseHTTPRequestHandler):
         self.wfile.write(b"Bot Aktif!")
 
     def log_message(self, format, *args):
-        pass  # Log kalabalığını önler
+        pass
 
 def start_render_server():
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(('0.0.0.0', port), RenderHealthServer)
     server.serve_forever()
 
-# Render servisi ayağa kaldırırken portu anında açık bulsun diye thread hemen başlatılır
 threading.Thread(target=start_render_server, daemon=True).start()
 
 
-# --- BOT TANIMLARI VE AYARLAR ---
+# --- BOT AYARLARI ---
 TELEGRAM_BOT_TOKEN = "8902458393:AAFbMG-7nAuIFnBdWsBw5xilDiUCetSkSEg"
 TELEGRAM_CHAT_ID = "6009524525"
 
@@ -141,7 +140,7 @@ def send_telegram_message(text, reply_markup=None):
     try:
         requests.post(url, json=payload, timeout=8)
     except Exception as e:
-        print(f"[!] Gönderim hatası: {e}")
+        print(f"[!] Mesaj gönderme hatası: {e}")
 
 
 def send_telegram_photo(photo_url, caption=""):
@@ -301,7 +300,7 @@ def get_status_report_text():
     return "\n".join(lines)
 
 
-# --- TELEGRAM MESAJ VE ETKİLEŞİM ---
+# --- TELEGRAM MESAJ VE ETKİLEŞİM İŞLEME ---
 def handle_callback(callback_data):
     global IS_TRACKING_PAUSED, SILENT_MODE
 
@@ -324,8 +323,14 @@ def handle_callback(callback_data):
         send_telegram_message(f"🔕 Sessiz mod: {'AÇIK' if SILENT_MODE else 'KAPALI'}", reply_markup=get_inline_keyboard())
 
 
-def handle_message(text):
+def handle_message(text, chat_id):
     global CHECK_INTERVAL_SECONDS
+    print(f"[LOG] Telegram'dan mesaj alindi: '{text}' | Gonderen ID: {chat_id}")
+
+    if str(chat_id) != str(TELEGRAM_CHAT_ID):
+        print(f"[UYARI] Chat ID uyusmuyor! Gelen: {chat_id} | Beklenen: {TELEGRAM_CHAT_ID}")
+        return
+
     parts = text.strip().split()
     if not parts:
         return
@@ -385,10 +390,11 @@ def handle_message(text):
 
 
 def listen_telegram():
+    print("[LOG] Telegram dinleyici aktif edildi.")
     try:
         requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=True", timeout=5)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[!] Webhook temizleme hatası: {e}")
 
     last_update_id = 0
     while True:
@@ -403,19 +409,25 @@ def listen_telegram():
                 last_update_id = item["update_id"]
 
                 cb = item.get("callback_query")
-                if cb and str(cb.get("message", {}).get("chat", {}).get("id")) == str(TELEGRAM_CHAT_ID):
-                    try:
-                        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={"callback_query_id": cb["id"]}, timeout=4)
-                    except Exception:
-                        pass
-                    if cb.get("data"):
-                        handle_callback(cb["data"])
+                if cb:
+                    cb_chat_id = str(cb.get("message", {}).get("chat", {}).get("id", ""))
+                    if cb_chat_id == str(TELEGRAM_CHAT_ID):
+                        try:
+                            requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={"callback_query_id": cb["id"]}, timeout=4)
+                        except Exception:
+                            pass
+                        if cb.get("data"):
+                            handle_callback(cb["data"])
                     continue
 
                 msg = item.get("message", {})
-                if str(msg.get("chat", {}).get("id")) == str(TELEGRAM_CHAT_ID) and msg.get("text"):
-                    handle_message(msg["text"])
-        except Exception:
+                chat_id = str(msg.get("chat", {}).get("id", ""))
+                text = msg.get("text", "")
+                if chat_id and text:
+                    handle_message(text, chat_id)
+
+        except Exception as e:
+            print(f"[!] getUpdates döngü hatası: {e}")
             time.sleep(2)
         time.sleep(0.3)
 
