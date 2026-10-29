@@ -3,6 +3,7 @@ import re
 import time
 import json
 import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 from bs4 import BeautifulSoup
 
@@ -58,6 +59,24 @@ HEADERS = {
 }
 
 LAST_AUDIT_REPORT = {}
+
+
+# --- RENDER İÇİN WEBSERVER (PORT HATASINI ENGELLER) ---
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b"Bot Aktif!")
+
+    def log_message(self, format, *args):
+        pass
+
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 10000))  # Render varsayılan olarak PORT değişkeni atar
+    server = HTTPServer(('0.0.0.0', port), SimpleHandler)
+    server.serve_forever()
 
 
 def load_json(filepath, default_val):
@@ -405,8 +424,15 @@ def main():
             current_state[key] = info.get("default_val", 0)
     save_json(STATE_FILE, current_state)
 
+    # 1. Render için Web Sunucusu (Arka planda port dinler)
+    threading.Thread(target=run_web_server, daemon=True).start()
+
+    # 2. Takip döngüsü
     threading.Thread(target=loop_tracker, daemon=True).start()
-    send_telegram_message("🚀 Bot Başlatıldı! Aktif olarak çalışıyor.", reply_markup=get_inline_keyboard())
+
+    send_telegram_message("🚀 Bot Başlatıldı! Render üzerinde aktif.", reply_markup=get_inline_keyboard())
+
+    # 3. Telegram dinleyici ana süreç
     listen_telegram()
 
 
