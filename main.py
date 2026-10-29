@@ -1,31 +1,14 @@
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(b"OK")
-    def log_message(self, format, *args):
-        return  # Log kirliliği yapmasın
-
-def run_fake_server():
-    server = HTTPServer(('0.0.0.0', 8080), HealthCheckHandler)
-    server.serve_forever()
-
-# Arka planda 8080 portunu dinleyecek thread başlat:
-threading.Thread(target=run_fake_server, daemon=True).start()
-
 import os
 import re
 import time
 import json
 import threading
+import socketserver
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 from bs4 import BeautifulSoup
 
+# --- SABIT TANIMLAR VE AYARLAR ---
 TELEGRAM_BOT_TOKEN = "8902458393:AAFbMG-7nAuIFnBdWsBw5xilDiUCetSkSEg"
 TELEGRAM_CHAT_ID = "6009524525"
 
@@ -82,7 +65,7 @@ HEADERS = {
 LAST_AUDIT_REPORT = {}
 
 
-# --- FLY.IO İÇİN SAHTE WEB SUNUCUSU ---
+# --- FLY.IO HEALTH CHECK SUNUCUSU ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -91,16 +74,22 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Bot Aktif ve Calisiyor!")
 
     def log_message(self, format, *args):
-        pass  # Terminali gereksiz loglarla doldurmasin
+        pass  # Terminali log kalabalığından koru
+
+
+class ReusableTCPServer(HTTPServer):
+    # Portun bekleme süresine takılmadan hemen yeniden bağlanabilmesi için:
+    allow_reuse_address = True
 
 
 def start_health_server():
     """Fly.io'nun kapanmaması ve 8080 portunu onaylaması için web sunucusu."""
     port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    server = ReusableTCPServer(('0.0.0.0', port), HealthCheckHandler)
     server.serve_forever()
 
 
+# --- VERİ YÖNETİMİ ---
 def load_json(filepath, default_val):
     if os.path.exists(filepath):
         try:
@@ -124,6 +113,7 @@ def get_pages():
     return pages
 
 
+# --- TELEGRAM İŞLEMLERİ ---
 def get_inline_keyboard():
     dk = CHECK_INTERVAL_SECONDS // 60
     return {
@@ -177,6 +167,7 @@ def send_telegram_photo(photo_url, caption=""):
         print(f"[!] Fotoğraf gönderilemedi: {e}")
 
 
+# --- KONTROL MEKANİZMALARI ---
 def fetch_viewoo_reposts(username):
     ts = int(time.time())
     url = f"https://viewoo.co/api/reposts?username={username}&_={ts}"
@@ -359,6 +350,7 @@ def get_status_report_text():
     return "\n".join(lines)
 
 
+# --- MESAJ VE ETKİLEŞİM İŞLEME ---
 def handle_callback(callback_data, chat_id):
     global IS_TRACKING_PAUSED, SILENT_MODE
 
@@ -499,6 +491,7 @@ def handle_message(text, chat_id):
         send_telegram_message(rehber, reply_markup=get_inline_keyboard())
 
 
+# --- TELEGRAM VE ARKA PLAN DÖNGÜLERİ ---
 def listen_telegram():
     try:
         requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook?drop_pending_updates=True", timeout=5)
@@ -544,7 +537,7 @@ def listen_telegram():
                     if text and chat_id:
                         handle_message(text, chat_id)
 
-        except Exception as e:
+        except Exception:
             time.sleep(2)
 
         time.sleep(0.3)
@@ -557,6 +550,7 @@ def loop_tracker():
         time.sleep(CHECK_INTERVAL_SECONDS)
 
 
+# --- ANA ÇALIŞTIRICI ---
 def main():
     print("Master Takip Botu Başlatıldı...")
 
@@ -578,7 +572,7 @@ def main():
 
     send_telegram_message("🚀 Bot Başlatıldı! Fly.io üzerinde aktif.", reply_markup=get_inline_keyboard())
 
-    # 3. Fly.io'nun kapanmaması için HTTP sunucusunu ana thread'de açık tut
+    # 3. Fly.io için tek web sunucusu (Ana thread'de port dinlenir)
     start_health_server()
 
 
