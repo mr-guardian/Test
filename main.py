@@ -7,6 +7,27 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 from bs4 import BeautifulSoup
 
+# --- RENDER PORT DİNLEYİCİSİ (PORT TIMEOUT HATASINI ENGELLER) ---
+class RenderHealthServer(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/plain; charset=utf-8')
+        self.end_headers()
+        self.wfile.write(b"Bot Aktif!")
+
+    def log_message(self, format, *args):
+        pass  # Log kalabalığını önler
+
+def start_render_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), RenderHealthServer)
+    server.serve_forever()
+
+# Render servisi ayağa kaldırırken portu anında açık bulsun diye thread hemen başlatılır
+threading.Thread(target=start_render_server, daemon=True).start()
+
+
+# --- BOT TANIMLARI VE AYARLAR ---
 TELEGRAM_BOT_TOKEN = "8902458393:AAFbMG-7nAuIFnBdWsBw5xilDiUCetSkSEg"
 TELEGRAM_CHAT_ID = "6009524525"
 
@@ -61,24 +82,7 @@ HEADERS = {
 LAST_AUDIT_REPORT = {}
 
 
-# --- RENDER İÇİN WEBSERVER (PORT HATASINI ENGELLER) ---
-class SimpleHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(b"Bot Aktif!")
-
-    def log_message(self, format, *args):
-        pass
-
-
-def run_web_server():
-    port = int(os.environ.get("PORT", 10000))  # Render varsayılan olarak PORT değişkeni atar
-    server = HTTPServer(('0.0.0.0', port), SimpleHandler)
-    server.serve_forever()
-
-
+# --- VERİ YÖNETİMİ ---
 def load_json(filepath, default_val):
     if os.path.exists(filepath):
         try:
@@ -102,6 +106,7 @@ def get_pages():
     return pages
 
 
+# --- TELEGRAM İŞLEMLERİ ---
 def get_inline_keyboard():
     dk = CHECK_INTERVAL_SECONDS // 60
     return {
@@ -123,6 +128,9 @@ def get_inline_keyboard():
 
 
 def send_telegram_message(text, reply_markup=None):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": str(text)[:4000],
@@ -131,12 +139,15 @@ def send_telegram_message(text, reply_markup=None):
     if reply_markup:
         payload["reply_markup"] = reply_markup
     try:
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json=payload, timeout=8)
+        requests.post(url, json=payload, timeout=8)
     except Exception as e:
-        print(f"[!] Mesaj hatası: {e}")
+        print(f"[!] Gönderim hatası: {e}")
 
 
 def send_telegram_photo(photo_url, caption=""):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID or not photo_url:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "photo": photo_url,
@@ -144,11 +155,12 @@ def send_telegram_photo(photo_url, caption=""):
         "disable_notification": SILENT_MODE
     }
     try:
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto", json=payload, timeout=10)
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
         print(f"[!] Fotoğraf hatası: {e}")
 
 
+# --- KONTROL MEKANİZMALARI ---
 def fetch_viewoo_reposts(username):
     url = f"https://viewoo.co/api/reposts?username={username}&_={int(time.time())}"
     try:
@@ -289,6 +301,7 @@ def get_status_report_text():
     return "\n".join(lines)
 
 
+# --- TELEGRAM MESAJ VE ETKİLEŞİM ---
 def handle_callback(callback_data):
     global IS_TRACKING_PAUSED, SILENT_MODE
 
@@ -424,15 +437,8 @@ def main():
             current_state[key] = info.get("default_val", 0)
     save_json(STATE_FILE, current_state)
 
-    # 1. Render için Web Sunucusu (Arka planda port dinler)
-    threading.Thread(target=run_web_server, daemon=True).start()
-
-    # 2. Takip döngüsü
     threading.Thread(target=loop_tracker, daemon=True).start()
-
     send_telegram_message("🚀 Bot Başlatıldı! Render üzerinde aktif.", reply_markup=get_inline_keyboard())
-
-    # 3. Telegram dinleyici ana süreç
     listen_telegram()
 
 
