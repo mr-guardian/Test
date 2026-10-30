@@ -51,31 +51,50 @@ def log(msg):
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
 
 
-def notify(text):
+def notify(text, reply_markup=None):
     try:
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        res = requests.post(url, json={"chat_id": CHAT_ID, "text": text[:4000]}, timeout=10)
+        payload = {
+            "chat_id": CHAT_ID,
+            "text": text[:4000]
+        }
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        res = requests.post(url, json=payload, timeout=10)
         if res.status_code != 200:
             log(f"[!] Telegram Hatasi: {res.status_code} - {res.text}")
     except Exception as e:
         log(f"[!] Telegram bildirim hatasi: {e}")
 
 
+def answer_callback(callback_query_id, text=None):
+    try:
+        url = f"https://api.telegram.org/bot{TOKEN}/answerCallbackQuery"
+        payload = {"callback_query_id": callback_query_id}
+        if text:
+            payload["text"] = text
+        requests.post(url, json=payload, timeout=5)
+    except Exception:
+        pass
+
+
 def send_media(media_url, caption=""):
     try:
-        # Önce video olarak göndermeyi dene
         v_url = f"https://api.telegram.org/bot{TOKEN}/sendVideo"
-        res = requests.post(v_url, json={"chat_id": CHAT_ID, "video": media_url, "caption": caption}, timeout=20)
+        res = requests.post(v_url, json={"chat_id": CHAT_ID, "video": media_url, "caption": caption}, timeout=25)
         if res.status_code == 200:
-            return
+            return True
 
-        # Video değilse görsel olarak gönder
         p_url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
-        res = requests.post(p_url, json={"chat_id": CHAT_ID, "photo": media_url, "caption": caption}, timeout=20)
-        if res.status_code != 200:
-            log(f"[!] Medya gonderilemedi: {res.text}")
+        res = requests.post(p_url, json={"chat_id": CHAT_ID, "photo": media_url, "caption": caption}, timeout=25)
+        if res.status_code == 200:
+            return True
+            
+        log(f"[!] Medya gonderilemedi: {res.text}")
+        return False
     except Exception as e:
         log(f"[!] Telegram medya hatasi: {e}")
+        return False
 
 
 def get_tiktok_data(username, extract_story_media=False):
@@ -168,17 +187,17 @@ def get_tiktok_data(username, extract_story_media=False):
                 return 0;
             }''')
 
-            # Hikaye varsa ve medya çekilmesi isteniyorsa doğrudan tıkla ve medya URL'ini al
+            # Hikaye medyası çekme isteği varsa
             if has_story and extract_story_media:
                 try:
                     avatar_el = page.query_selector('[data-e2e="user-avatar"], [class*="AvatarContainer"]')
                     if avatar_el:
                         avatar_el.click()
-                        time.sleep(2.5)
+                        time.sleep(3)
                         story_media_url = page.evaluate('''() => {
                             const vid = document.querySelector('video source, video');
                             if (vid && vid.src) return vid.src;
-                            const img = document.querySelector('img[class*="Story"], img[class*="story"]');
+                            const img = document.querySelector('img[class*="Story"], img[class*="story"], div[class*="Story"] img');
                             if (img && img.src) return img.src;
                             return null;
                         }''')
@@ -252,6 +271,17 @@ def get_tiktok_data(username, extract_story_media=False):
     return reposts_count, has_story, story_media_url
 
 
+def fetch_and_send_sillagunerrr_story():
+    notify("⏳ sillagunerrr hikayesi aliniyor, bekleyiniz...")
+    _, has_st, st_url = get_tiktok_data("sillagunerrr", extract_story_media=True)
+    if has_st and st_url:
+        ok = send_media(st_url, caption="📸 sillagunerrr Güncel Hikayesi")
+        if not ok:
+            notify(f"🔗 Hikaye Medya Linki:\n{st_url}")
+    else:
+        notify("❌ Aktif hikaye bulunamadi veya medya yuklenemedi.")
+
+
 def get_threads_count(url):
     try:
         headers = {
@@ -260,7 +290,9 @@ def get_threads_count(url):
         resp = requests.get(url, headers=headers, timeout=15)
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, "html.parser")
-            post = soup.select_one(".thread-content, .post-content, article")
+            
+            # Son Threads metnini hassas seçicilerle tara
+            post = soup.select_one(".thread-content, .post-content, .thread-text, [class*='content'], article")
             post_txt = post.get_text().strip() if post else None
 
             m = re.findall(r'threads\s*[:\s]?\s*(\d+)', soup.get_text(), re.I)
@@ -277,127 +309,4 @@ def run_full_check(is_manual=False):
         state = memory_state.copy()
         if os.path.exists(STATE_FILE):
             try:
-                with open(STATE_FILE, "r", encoding="utf-8") as f:
-                    state = json.load(f)
-            except Exception:
-                pass
-
-        current_summary = []
-        tiktok_cache = {}
-
-        for k, info in TARGETS.items():
-            old_val = state.get(k)
-            new_val = None
-            post_txt = None
-            p = info["platform"]
-
-            if p.startswith("tiktok"):
-                uname = info["username"]
-                if uname not in tiktok_cache:
-                    log(f"[*] TikTok taraniyor: @{uname}...")
-                    # sillagunerrr hesabı taranırken hikaye medyasını da yakala
-                    need_media = (uname == "sillagunerrr")
-                    rep_cnt, st_cnt, st_media = get_tiktok_data(uname, extract_story_media=need_media)
-                    tiktok_cache[uname] = {
-                        "reposts": rep_cnt,
-                        "story": st_cnt,
-                        "story_media": st_media
-                    }
-
-                cached = tiktok_cache[uname]
-                if p == "tiktok_reposts":
-                    new_val = cached["reposts"]
-                elif p == "tiktok_story":
-                    new_val = cached["story"]
-
-            elif p == "threads":
-                log(f"[*] Threads taraniyor: {info['url']}...")
-                new_val, post_txt = get_threads_count(info["url"])
-
-            if new_val is None:
-                current_summary.append(f"• {info['name']}: Deger Alinamadi")
-                log(f"[-] {info['name']} icin deger alinamadi.")
-                continue
-
-            current_summary.append(f"• {info['name']}: {new_val}")
-            log(f"[+] {info['name']} -> Guncel: {new_val} (Onceki: {old_val})")
-
-            # YALNIZCA DEĞİŞİKLİK OLDUĞUNDA BİLDİRİM GÖNDER
-            if old_val is not None and new_val != old_val:
-                fark = new_val - old_val
-                target_url = f"https://www.tiktok.com/@{info.get('username')}" if "username" in info else info["url"]
-                msg = f"🔔 {info['name']}: {old_val} ➔ {new_val} ({fark:+d})\n🔗 {target_url}"
-                
-                if fark > 0 and post_txt:
-                    msg += f"\n📝 Son Gonderi: \"{post_txt[:200]}\""
-                notify(msg)
-
-                # sillagunerrr yeni bir hikaye paylaştıysa medyayı doğrudan gönder
-                if k == "sillagunerrr_story" and new_val > old_val:
-                    st_media = tiktok_cache.get("sillagunerrr", {}).get("story_media")
-                    if st_media:
-                        send_media(st_media, caption="📸 sillagunerrr Yeni Hikaye")
-
-            state[k] = new_val
-
-        memory_state = state.copy()
-
-        try:
-            with open(STATE_FILE, "w", encoding="utf-8") as f:
-                json.dump(state, f)
-        except Exception as file_err:
-            log(f"[!] Dosya yazma uyarisi: {file_err}")
-
-        # Yalnızca manuel tetiklendiğinde raporu döndür
-        if is_manual:
-            return "\n".join(current_summary)
-        return None
-
-
-def tracker_thread():
-    while True:
-        time.sleep(ARALIK)
-        log("Zamanlanmis rutin kontrol calisiyor (Sessiz mod)...")
-        run_full_check(is_manual=False)
-
-
-def bot_listener():
-    last_update_id = 0
-    try:
-        requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=True", timeout=5)
-    except Exception:
-        pass
-
-    while True:
-        try:
-            url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
-            resp = requests.get(url, params={"offset": last_update_id + 1, "timeout": 20}, timeout=25).json()
-
-            for item in resp.get("result", []):
-                last_update_id = item["update_id"]
-                msg = item.get("message", {})
-                chat_id = str(msg.get("chat", {}).get("id", ""))
-                text = msg.get("text", "").strip().lower()
-
-                if chat_id == str(CHAT_ID) and text:
-                    if text in ["/kontrol", "kontrol"]:
-                        notify("🔍 Sayfalar taraniyor, bekleyiniz...")
-                        summary = run_full_check(is_manual=True)
-                        notify(f"📊 Canli Durum Raporu:\n\n{summary}")
-
-                    elif text in ["/durum", "durum"]:
-                        summary = [f"• {info['name']}: {memory_state.get(k, 'Kayit yok')}" for k, info in TARGETS.items()]
-                        notify("📋 Kayitli Veriler:\n\n" + "\n".join(summary))
-
-        except Exception:
-            time.sleep(2)
-        time.sleep(0.5)
-
-
-if __name__ == "__main__":
-    log("Bulut Takip Botu Baslatiliyor...")
-    # İlk başlangıçta sadece takip durumunu doğrular, sohbeti raporla doldurmaz
-    notify("🚀 Bot aktif edildi! Degisiklik olmadikca rapor gonderilmeyecek, yalnizca yeni hareketlerde bildirim alacaksiniz.")
-    run_full_check(is_manual=False)
-    threading.Thread(target=tracker_thread, daemon=True).start()
-    bot_listener()
+                with open(STATE_FILE, "r
