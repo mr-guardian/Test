@@ -3,6 +3,7 @@ import re
 import time
 import json
 import threading
+import io
 import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
@@ -78,20 +79,32 @@ def answer_callback(callback_query_id, text=None):
         pass
 
 
-def send_media(media_url, caption=""):
+def send_media(media_url, is_video=False, caption=""):
     try:
-        v_url = f"https://api.telegram.org/bot{TOKEN}/sendVideo"
-        res = requests.post(v_url, json={"chat_id": CHAT_ID, "video": media_url, "caption": caption}, timeout=25)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://www.tiktok.com/"
+        }
+        # Medyayı belleğe indirip dosya olarak yüklemek TikTok'un link engellemesini aşar
+        res = requests.get(media_url, headers=headers, timeout=25)
         if res.status_code == 200:
-            return True
+            file_data = io.BytesIO(res.content)
+            if is_video:
+                v_url = f"https://api.telegram.org/bot{TOKEN}/sendVideo"
+                r = requests.post(v_url, data={"chat_id": CHAT_ID, "caption": caption}, files={"video": ("story.mp4", file_data, "video/mp4")}, timeout=30)
+                if r.status_code == 200:
+                    return True
+            else:
+                p_url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
+                r = requests.post(p_url, data={"chat_id": CHAT_ID, "caption": caption}, files={"photo": ("story.jpg", file_data, "image/jpeg")}, timeout=30)
+                if r.status_code == 200:
+                    return True
 
-        p_url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
-        res = requests.post(p_url, json={"chat_id": CHAT_ID, "photo": media_url, "caption": caption}, timeout=25)
-        if res.status_code == 200:
-            return True
-            
-        log(f"[!] Medya gonderilemedi: {res.text}")
-        return False
+        # Bellekten yüklenemezse URL olarak dene
+        endpoint = "sendVideo" if is_video else "sendPhoto"
+        key = "video" if is_video else "photo"
+        r = requests.post(f"https://api.telegram.org/bot{TOKEN}/{endpoint}", json={"chat_id": CHAT_ID, key: media_url, "caption": caption}, timeout=20)
+        return r.status_code == 200
     except Exception as e:
         log(f"[!] Telegram medya hatasi: {e}")
         return False
@@ -101,6 +114,7 @@ def get_tiktok_data(username, extract_story_media=False):
     reposts_count = None
     has_story = 0
     story_media_url = None
+    is_video = False
 
     try:
         with sync_playwright() as p:
@@ -187,20 +201,37 @@ def get_tiktok_data(username, extract_story_media=False):
                 return 0;
             }''')
 
-            # Hikaye medyası çekme isteği varsa
+            # Hikaye medyası çekme (Profil fotoğrafını hariç tutan hassas seçici)
             if has_story and extract_story_media:
                 try:
                     avatar_el = page.query_selector('[data-e2e="user-avatar"], [class*="AvatarContainer"]')
                     if avatar_el:
                         avatar_el.click()
                         time.sleep(3)
-                        story_media_url = page.evaluate('''() => {
-                            const vid = document.querySelector('video source, video');
-                            if (vid && vid.src) return vid.src;
-                            const img = document.querySelector('img[class*="Story"], img[class*="story"], div[class*="Story"] img');
-                            if (img && img.src) return img.src;
+                        
+                        media_info = page.evaluate('''() => {
+                            // 1. Hikaye modalı içindeki video kontrolü
+                            const vid = document.querySelector('div[class*="story"] video, div[data-e2e*="story"] video, video');
+                            if (vid) {
+                                const src = vid.currentSrc || vid.src || vid.querySelector('source')?.src;
+                                if (src && src.startsWith("http")) return { url: src, is_video: true };
+                            }
+
+                            // 2. Hikaye modalı içindeki hikaye resmi (profil fotoğrafını hariç tut)
+                            const storyImgs = Array.from(document.querySelectorAll('div[class*="story"] img, div[data-e2e*="story"] img, img[class*="story"]'));
+                            for (let img of storyImgs) {
+                                // Profil resmi konteynerindekileri yok say
+                                if (!img.closest('[data-e2e="user-avatar"]') && !img.closest('[class*="AvatarContainer"]') && img.src) {
+                                    return { url: img.src, is_video: false };
+                                }
+                            }
                             return null;
                         }''')
+
+                        if media_info:
+                            story_media_url = media_info.get("url")
+                            is_video = media_info.get("is_video", False)
+
                         page.keyboard.press("Escape")
                         time.sleep(1)
                 except Exception as story_err:
@@ -266,20 +297,20 @@ def get_tiktok_data(username, extract_story_media=False):
 
     except Exception as e:
         log(f"[!] Playwright hatasi (@{username}): {e}")
-        return None, None, None
+        return None, None, None, False
 
-    return reposts_count, has_story, story_media_url
+    return reposts_count, has_story, story_media_url, is_video
 
 
 def fetch_and_send_sillagunerrr_story():
     notify("⏳ sillagunerrr hikayesi aliniyor, bekleyiniz...")
-    _, has_st, st_url = get_tiktok_data("sillagunerrr", extract_story_media=True)
+    _, has_st, st_url, is_vid = get_tiktok_data("sillagunerrr", extract_story_media=True)
     if has_st and st_url:
-        ok = send_media(st_url, caption="📸 sillagunerrr Güncel Hikayesi")
+        ok = send_media(st_url, is_video=is_vid, caption="📸 sillagunerrr Güncel Hikayesi")
         if not ok:
             notify(f"🔗 Hikaye Medya Linki:\n{st_url}")
     else:
-        notify("❌ Aktif hikaye bulunamadi veya medya yuklenemedi.")
+        notify("❌ Aktif hikaye bulunamadi veya hikaye yuklenemedi.")
 
 
 def get_threads_count(url):
@@ -290,8 +321,6 @@ def get_threads_count(url):
         resp = requests.get(url, headers=headers, timeout=15)
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, "html.parser")
-            
-            # Son Threads metnini hassas seçicilerle tara
             post = soup.select_one(".thread-content, .post-content, .thread-text, [class*='content'], article")
             post_txt = post.get_text().strip() if post else None
 
@@ -327,11 +356,12 @@ def run_full_check(is_manual=False):
                 uname = info["username"]
                 if uname not in tiktok_cache:
                     log(f"[*] TikTok taraniyor: @{uname}...")
-                    rep_cnt, st_cnt, st_media = get_tiktok_data(uname, extract_story_media=(uname == "sillagunerrr"))
+                    rep_cnt, st_cnt, st_media, is_vid = get_tiktok_data(uname, extract_story_media=(uname == "sillagunerrr"))
                     tiktok_cache[uname] = {
                         "reposts": rep_cnt,
                         "story": st_cnt,
-                        "story_media": st_media
+                        "story_media": st_media,
+                        "is_video": is_vid
                     }
 
                 cached = tiktok_cache[uname]
@@ -358,11 +388,9 @@ def run_full_check(is_manual=False):
                 target_url = f"https://www.tiktok.com/@{info.get('username')}" if "username" in info else info["url"]
                 msg = f"🔔 {info['name']}: {old_val} ➔ {new_val} ({fark:+d})\n🔗 {target_url}"
                 
-                # Threads değişikliğinde son metni ekle
                 if p == "threads" and post_txt:
                     msg += f"\n\n📝 Son Threads Gönderisi:\n\"{post_txt[:400]}\""
-                
-                # Hikaye değişikliğinde tek tuşla hikaye isteme butonu ekle
+
                 reply_markup = None
                 if k == "sillagunerrr_story":
                     reply_markup = {
@@ -373,11 +401,12 @@ def run_full_check(is_manual=False):
 
                 notify(msg, reply_markup=reply_markup)
 
-                # Yeni hikaye açıldıysa doğrudan medyayı da yolla
+                # Yeni hikaye açıldıysa doğrudan medyayı yolla
                 if k == "sillagunerrr_story" and new_val > old_val:
                     st_media = tiktok_cache.get("sillagunerrr", {}).get("story_media")
+                    is_vid = tiktok_cache.get("sillagunerrr", {}).get("is_video", False)
                     if st_media:
-                        send_media(st_media, caption="📸 sillagunerrr Yeni Hikaye")
+                        send_media(st_media, is_video=is_vid, caption="📸 sillagunerrr Yeni Hikaye")
 
             state[k] = new_val
 
@@ -416,7 +445,7 @@ def bot_listener():
             for item in resp.get("result", []):
                 last_update_id = item["update_id"]
 
-                # 1. Buton Tıklamaları (Inline Keyboard Callbacks)
+                # Buton Tıklamaları (Callback)
                 if "callback_query" in item:
                     cb = item["callback_query"]
                     cb_id = cb["id"]
@@ -430,13 +459,12 @@ def bot_listener():
                         summary = run_full_check(is_manual=True)
                         notify(f"📊 Canlı Durum:\n\n{summary}")
 
-                # 2. Metin Mesajları ve Menü Butonları
+                # Metin Mesajları
                 msg = item.get("message", {})
                 chat_id = str(msg.get("chat", {}).get("id", ""))
                 text = msg.get("text", "").strip().lower()
 
                 if chat_id == str(CHAT_ID) and text:
-                    # Menü için buton paneli
                     main_buttons = {
                         "inline_keyboard": [
                             [{"text": "📸 sillagunerrr Son Hikaye", "callback_data": "get_story"}],
@@ -460,8 +488,8 @@ def bot_listener():
                         notify(
                             "🤖 Takip Botu Aktif!\n\n"
                             "• Değişiklik olmadıkça sessiz çalışır.\n"
-                            "• Threads sayısı değişirse son yazı gönderilir.\n"
-                            "• Aşağıdaki butonla istediğin an son hikayeyi talep edebilirsin.",
+                            "• Threads sayısı değişirse son metin iletilir.\n"
+                            "• Butonla anında hikaye talep edebilirsiniz.",
                             reply_markup=main_buttons
                         )
 
@@ -472,8 +500,6 @@ def bot_listener():
 
 if __name__ == "__main__":
     log("Bulut Takip Botu Başlatılıyor...")
-    
-    # Başlangıçta butonlu mesaj gönder
     start_markup = {
         "inline_keyboard": [
             [{"text": "📸 sillagunerrr Son Hikaye", "callback_data": "get_story"}],
@@ -481,7 +507,6 @@ if __name__ == "__main__":
         ]
     }
     notify("🚀 Bot aktif edildi! Değişiklik olmadıkça rapor gelmeyecek.", reply_markup=start_markup)
-    
     run_full_check(is_manual=False)
     threading.Thread(target=tracker_thread, daemon=True).start()
     bot_listener()
