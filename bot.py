@@ -119,9 +119,11 @@ def get_tiktok_data(username):
             captured_reposts = []
             captured_story_count = []
 
-            # Ağ trafiğinden hem repostları hem hikaye listesini yakala
+            # Ağ paketlerini yakala
             def on_response(response):
                 url = response.url.lower()
+                
+                # 1. Repost API
                 if "item_list" in url and "repost" in url:
                     try:
                         res_json = response.json()
@@ -131,11 +133,17 @@ def get_tiktok_data(username):
                     except Exception:
                         pass
 
-                # Hikaye listesini ağdan yakalama
-                if any(x in url for x in ["story", "story_list", "story/detail", "aweme/v1/story"]):
+                # 2. Hikaye Verisi API (aweme_list / itemList)
+                if any(x in url for x in ["story", "story_list", "story/detail", "aweme/v1/feed"]):
                     try:
                         res_json = response.json()
-                        story_items = res_json.get("itemList") or res_json.get("story_list") or res_json.get("stories") or res_json.get("aweme_list")
+                        # TikTok hikayeleri aweme_list veya itemList altında döner
+                        story_items = (
+                            res_json.get("aweme_list") or 
+                            res_json.get("itemList") or 
+                            res_json.get("story_list") or 
+                            res_json.get("stories")
+                        )
                         if isinstance(story_items, list):
                             captured_story_count.append(len(story_items))
                     except Exception:
@@ -162,42 +170,29 @@ def get_tiktok_data(username):
                 except Exception:
                     pass
 
-            # 1. Hikaye Sayısını Belirleme (Ağ + DOM Segment Sayımı)
-            dom_story_count = page.evaluate('''() => {
-                // Segmentli SVG çemberleri (birden fazla hikaye olduğunda ayrık circle parçaları oluşur)
-                const circles = Array.from(document.querySelectorAll('circle[stroke*="url"], svg[class*="story"] circle, [class*="avatar-story"] circle'));
-                if (circles.length > 0) {
-                    return circles.length;
-                }
-
-                // stroke-dasharray özelliğinden segment adedini tespit et
-                const singleCircle = document.querySelector('circle[stroke-dasharray]');
-                if (singleCircle) {
-                    const dash = singleCircle.getAttribute('stroke-dasharray') || '';
-                    const parts = dash.split(/[, ]+/).filter(Boolean);
-                    if (parts.length > 2) {
-                        return Math.floor(parts.length / 2);
-                    }
-                }
-
-                // Genel avatar hikaye çerçevesi varsa en az 1
-                const svgStory = document.querySelector('svg[class*="story"], div[class*="avatar-story"]');
-                if (svgStory) return 1;
-
+            # 1. Hikaye Varlığı Kontrolü (Halka Var mı?)
+            has_story_ring = page.evaluate('''() => {
+                const svgStory = document.querySelector('circle[stroke*="url"], svg[class*="story"], div[class*="avatar-story"]');
+                if (svgStory) return true;
                 const avatar = document.querySelector('[data-e2e="user-avatar"], [class*="AvatarContainer"]');
                 if (avatar) {
                     const style = window.getComputedStyle(avatar);
                     if (avatar.innerHTML.includes("circle") || avatar.innerHTML.includes("story") || style.borderColor.includes("rgb")) {
-                        return 1;
+                        return true;
                     }
                 }
-                return 0;
+                return false;
             }''')
 
-            if captured_story_count and captured_story_count[-1] > 0:
-                story_count = captured_story_count[-1]
+            # Hikaye sayısını belirle
+            if not has_story_ring:
+                story_count = 0
             else:
-                story_count = dom_story_count
+                # Ağ paketinden gerçek adet geldiyse onu kullan, yoksa en az 1 hikaye vardır
+                if captured_story_count and captured_story_count[-1] > 0:
+                    story_count = captured_story_count[-1]
+                else:
+                    story_count = 1
 
             page.evaluate("window.scrollBy(0, 300)")
             time.sleep(1)
@@ -416,7 +411,7 @@ def bot_listener():
                         notify(
                             "🤖 Takip Botu Aktif!\n\n"
                             "• Değişiklik olmadıkça sessiz çalışır.\n"
-                            "• Hikaye adedi ve repost değişimlerinde bildirim alırsınız.\n"
+                            "• Hikaye veya repost sayısı değiştiğinde bildirim alırsınız.\n"
                             "• Threads sayısı değiştiğinde son metin eklenir.",
                             reply_markup=main_buttons
                         )
