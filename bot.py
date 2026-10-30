@@ -309,4 +309,179 @@ def run_full_check(is_manual=False):
         state = memory_state.copy()
         if os.path.exists(STATE_FILE):
             try:
-                with open(STATE_FILE, "r
+                with open(STATE_FILE, "r", encoding="utf-8") as f:
+                    state = json.load(f)
+            except Exception:
+                pass
+
+        current_summary = []
+        tiktok_cache = {}
+
+        for k, info in TARGETS.items():
+            old_val = state.get(k)
+            new_val = None
+            post_txt = None
+            p = info["platform"]
+
+            if p.startswith("tiktok"):
+                uname = info["username"]
+                if uname not in tiktok_cache:
+                    log(f"[*] TikTok taraniyor: @{uname}...")
+                    rep_cnt, st_cnt, st_media = get_tiktok_data(uname, extract_story_media=(uname == "sillagunerrr"))
+                    tiktok_cache[uname] = {
+                        "reposts": rep_cnt,
+                        "story": st_cnt,
+                        "story_media": st_media
+                    }
+
+                cached = tiktok_cache[uname]
+                if p == "tiktok_reposts":
+                    new_val = cached["reposts"]
+                elif p == "tiktok_story":
+                    new_val = cached["story"]
+
+            elif p == "threads":
+                log(f"[*] Threads taraniyor: {info['url']}...")
+                new_val, post_txt = get_threads_count(info["url"])
+
+            if new_val is None:
+                current_summary.append(f"• {info['name']}: Deger Alinamadi")
+                log(f"[-] {info['name']} icin deger alinamadi.")
+                continue
+
+            current_summary.append(f"• {info['name']}: {new_val}")
+            log(f"[+] {info['name']} -> Guncel: {new_val} (Onceki: {old_val})")
+
+            # YALNIZCA DEĞİŞİKLİK OLDUĞUNDA BİLDİRİM
+            if old_val is not None and new_val != old_val:
+                fark = new_val - old_val
+                target_url = f"https://www.tiktok.com/@{info.get('username')}" if "username" in info else info["url"]
+                msg = f"🔔 {info['name']}: {old_val} ➔ {new_val} ({fark:+d})\n🔗 {target_url}"
+                
+                # Threads değişikliğinde son metni ekle
+                if p == "threads" and post_txt:
+                    msg += f"\n\n📝 Son Threads Gönderisi:\n\"{post_txt[:400]}\""
+                
+                # Hikaye değişikliğinde tek tuşla hikaye isteme butonu ekle
+                reply_markup = None
+                if k == "sillagunerrr_story":
+                    reply_markup = {
+                        "inline_keyboard": [[
+                            {"text": "📸 Son Hikayeyi Gönder", "callback_data": "get_story"}
+                        ]]
+                    }
+
+                notify(msg, reply_markup=reply_markup)
+
+                # Yeni hikaye açıldıysa doğrudan medyayı da yolla
+                if k == "sillagunerrr_story" and new_val > old_val:
+                    st_media = tiktok_cache.get("sillagunerrr", {}).get("story_media")
+                    if st_media:
+                        send_media(st_media, caption="📸 sillagunerrr Yeni Hikaye")
+
+            state[k] = new_val
+
+        memory_state = state.copy()
+
+        try:
+            with open(STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump(state, f)
+        except Exception as file_err:
+            log(f"[!] Dosya yazma uyarisi: {file_err}")
+
+        if is_manual:
+            return "\n".join(current_summary)
+        return None
+
+
+def tracker_thread():
+    while True:
+        time.sleep(ARALIK)
+        log("Zamanlanmis rutin kontrol (Sessiz mod)...")
+        run_full_check(is_manual=False)
+
+
+def bot_listener():
+    last_update_id = 0
+    try:
+        requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=True", timeout=5)
+    except Exception:
+        pass
+
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
+            resp = requests.get(url, params={"offset": last_update_id + 1, "timeout": 20}, timeout=25).json()
+
+            for item in resp.get("result", []):
+                last_update_id = item["update_id"]
+
+                # 1. Buton Tıklamaları (Inline Keyboard Callbacks)
+                if "callback_query" in item:
+                    cb = item["callback_query"]
+                    cb_id = cb["id"]
+                    cb_data = cb.get("data")
+                    answer_callback(cb_id, "İşlem yapılıyor...")
+
+                    if cb_data == "get_story":
+                        threading.Thread(target=fetch_and_send_sillagunerrr_story, daemon=True).start()
+                    elif cb_data == "run_check":
+                        notify("🔍 Sayfalar taranıyor...")
+                        summary = run_full_check(is_manual=True)
+                        notify(f"📊 Canlı Durum:\n\n{summary}")
+
+                # 2. Metin Mesajları ve Menü Butonları
+                msg = item.get("message", {})
+                chat_id = str(msg.get("chat", {}).get("id", ""))
+                text = msg.get("text", "").strip().lower()
+
+                if chat_id == str(CHAT_ID) and text:
+                    # Menü için buton paneli
+                    main_buttons = {
+                        "inline_keyboard": [
+                            [{"text": "📸 sillagunerrr Son Hikaye", "callback_data": "get_story"}],
+                            [{"text": "🔍 Canlı Kontrol", "callback_data": "run_check"}]
+                        ]
+                    }
+
+                    if text in ["/kontrol", "kontrol", "🔎 canli kontrol"]:
+                        notify("🔍 Sayfalar taranıyor, bekleyiniz...")
+                        summary = run_full_check(is_manual=True)
+                        notify(f"📊 Canlı Durum Raporu:\n\n{summary}", reply_markup=main_buttons)
+
+                    elif text in ["/hikaye", "hikaye", "story"]:
+                        threading.Thread(target=fetch_and_send_sillagunerrr_story, daemon=True).start()
+
+                    elif text in ["/durum", "durum"]:
+                        summary = [f"• {info['name']}: {memory_state.get(k, 'Kayit yok')}" for k, info in TARGETS.items()]
+                        notify("📋 Kayıtlı Veriler:\n\n" + "\n".join(summary), reply_markup=main_buttons)
+
+                    elif text in ["/start", "start", "yardim", "/yardim"]:
+                        notify(
+                            "🤖 Takip Botu Aktif!\n\n"
+                            "• Değişiklik olmadıkça sessiz çalışır.\n"
+                            "• Threads sayısı değişirse son yazı gönderilir.\n"
+                            "• Aşağıdaki butonla istediğin an son hikayeyi talep edebilirsin.",
+                            reply_markup=main_buttons
+                        )
+
+        except Exception:
+            time.sleep(2)
+        time.sleep(0.5)
+
+
+if __name__ == "__main__":
+    log("Bulut Takip Botu Başlatılıyor...")
+    
+    # Başlangıçta butonlu mesaj gönder
+    start_markup = {
+        "inline_keyboard": [
+            [{"text": "📸 sillagunerrr Son Hikaye", "callback_data": "get_story"}],
+            [{"text": "🔍 Canlı Kontrol", "callback_data": "run_check"}]
+        ]
+    }
+    notify("🚀 Bot aktif edildi! Değişiklik olmadıkça rapor gelmeyecek.", reply_markup=start_markup)
+    
+    run_full_check(is_manual=False)
+    threading.Thread(target=tracker_thread, daemon=True).start()
+    bot_listener()
