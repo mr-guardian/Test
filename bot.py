@@ -89,7 +89,7 @@ def get_tiktok_data(username):
                 viewport={"width": 1440, "height": 900}
             )
 
-            # Webdriver bayrağını temizle
+            # Bot izlerini temizle
             context.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                 window.chrome = { runtime: {} };
@@ -105,9 +105,11 @@ def get_tiktok_data(username):
             page = context.new_page()
             captured_reposts = []
 
+            # Ağ trafiğinden dönen repost JSON verilerini yakala
             def on_response(response):
                 url = response.url.lower()
-                if "item_list" in url and any(x in url for x in ["repost", "user"]):
+                # TikTok'un repost API istek rotası
+                if "item_list" in url and "repost" in url:
                     try:
                         res_json = response.json()
                         items = res_json.get("itemList", [])
@@ -118,11 +120,10 @@ def get_tiktok_data(username):
 
             page.on("response", on_response)
 
-            url = f"https://www.tiktok.com/@{username}"
-            
-            # networkidle yerine domcontentloaded kullanılmalı (TikTok sonsuz ağ paketi yollar)
+            # Dili kesin olarak Türkçe sabitle
+            url = f"https://www.tiktok.com/@{username}?lang=tr-TR"
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            time.sleep(3.5)
+            time.sleep(3)
 
             # Pop-up / Çerez kapatma
             page.keyboard.press("Escape")
@@ -158,33 +159,39 @@ def get_tiktok_data(username):
             page.evaluate("window.scrollBy(0, 300)")
             time.sleep(1)
 
-            # 2. Repost Sekmesine Tıklama
-            tab_clicked = False
-            tab_candidates = [
-                page.locator('[data-e2e="repost-tab"]'),
-                page.locator('[data-e2e="reposts-tab"]'),
-                page.locator('div[role="tab"]').filter(has_text=re.compile(r'repost|yeniden', re.I)),
-                page.locator('p').filter(has_text=re.compile(r'^(reposts?|yeniden gönderilenler|yeniden)$', re.I))
-            ]
+            # 2. Doğrudan Repost Sekmesini Bul ve Tıkla (İkon ve Özel Nitelik Eşleşmesi)
+            tab_clicked = page.evaluate('''() => {
+                const tabs = Array.from(document.querySelectorAll('[role="tab"], div[data-e2e*="tab"], p, span'));
+                
+                // Öncelik 1: Repost / Yeniden metni veya niteliği
+                let target = tabs.find(el => {
+                    const txt = (el.innerText || "").trim().toLowerCase();
+                    const e2e = (el.getAttribute("data-e2e") || "").toLowerCase();
+                    return (
+                        e2e === "repost-tab" || 
+                        e2e === "reposts-tab" ||
+                        txt === "reposts" || 
+                        txt === "repost" || 
+                        txt === "yeniden gönderilenler" || 
+                        txt === "yeniden"
+                    );
+                });
 
-            for loc in tab_candidates:
-                try:
-                    if loc.count() > 0 and loc.first.is_visible():
-                        loc.first.scroll_into_view_if_needed()
-                        loc.first.click(force=True)
-                        tab_clicked = True
-                        break
-                except Exception:
-                    continue
+                // Öncelik 2: SVG repost ikonu barındıran sekme
+                if (!target) {
+                    target = tabs.find(el => {
+                        const html = el.innerHTML.toLowerCase();
+                        return html.includes("repost") && el.getAttribute("role") === "tab";
+                    });
+                }
 
-            if not tab_clicked:
-                try:
-                    role_tabs = page.locator('[role="tab"]')
-                    if role_tabs.count() >= 2:
-                        role_tabs.nth(1).click(force=True)
-                        tab_clicked = True
-                except Exception:
-                    pass
+                if (target) {
+                    target.scrollIntoView({ behavior: 'instant', block: 'center' });
+                    target.click();
+                    return true;
+                }
+                return false;
+            }''')
 
             if tab_clicked:
                 time.sleep(3.5)
@@ -192,15 +199,21 @@ def get_tiktok_data(username):
                 time.sleep(1)
 
             # 3. Sonuç Sayımı
+            # Ağ yanıtından yakalanan repost en kesin veridir
             if captured_reposts:
                 reposts_count = captured_reposts[-1]
             elif tab_clicked:
+                # Sadece seçili (aktif) sekmenin altındaki listeyi al
                 dom_count = page.evaluate('''() => {
-                    const list = document.querySelector('[data-e2e="user-post-item-list"], div[class*="DivVideoFeed"]');
-                    if (!list) return 0;
-                    const items = list.querySelectorAll('a[href*="/video/"]');
-                    const links = Array.from(items).map(a => a.href.split('?')[0]);
-                    return new Set(links).size;
+                    // Yalnızca repost listesi konteyneri
+                    const container = document.querySelector('div[data-e2e="user-repost-list"], div[data-e2e="user-post-item-list"]');
+                    if (!container) return 0;
+
+                    // Eğer ana profil videosuysa ve repost sekmesi tıklandıysa boş olabilir
+                    const items = container.querySelectorAll('[data-e2e="user-post-item"], a[href*="/video/"]');
+                    const links = Array.from(items).map(i => i.href || i.querySelector('a')?.href).filter(Boolean);
+                    const uniqueHrefs = new Set(links.map(l => l.split('?')[0]));
+                    return uniqueHrefs.size;
                 }''')
                 reposts_count = dom_count
             else:
