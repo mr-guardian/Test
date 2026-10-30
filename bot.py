@@ -117,35 +117,16 @@ def get_tiktok_data(username):
 
             page = context.new_page()
             captured_reposts = []
-            captured_story_count = []
 
-            # Ağ paketlerini yakala
+            # SADECE ve SADECE repost paketlerini dinle (hikaye API dinlemesi kaldırıldı)
             def on_response(response):
                 url = response.url.lower()
-                
-                # 1. Repost API
                 if "item_list" in url and "repost" in url:
                     try:
                         res_json = response.json()
                         items = res_json.get("itemList", [])
                         if items is not None:
                             captured_reposts.append(len(items))
-                    except Exception:
-                        pass
-
-                # 2. Hikaye Verisi API (aweme_list / itemList)
-                if any(x in url for x in ["story", "story_list", "story/detail", "aweme/v1/feed"]):
-                    try:
-                        res_json = response.json()
-                        # TikTok hikayeleri aweme_list veya itemList altında döner
-                        story_items = (
-                            res_json.get("aweme_list") or 
-                            res_json.get("itemList") or 
-                            res_json.get("story_list") or 
-                            res_json.get("stories")
-                        )
-                        if isinstance(story_items, list):
-                            captured_story_count.append(len(story_items))
                     except Exception:
                         pass
 
@@ -170,10 +151,10 @@ def get_tiktok_data(username):
                 except Exception:
                     pass
 
-            # 1. Hikaye Varlığı Kontrolü (Halka Var mı?)
+            # 1. Hikaye Kontrolü (Halka Tespiti + Progress Bar Sayımı)
             has_story_ring = page.evaluate('''() => {
-                const svgStory = document.querySelector('circle[stroke*="url"], svg[class*="story"], div[class*="avatar-story"]');
-                if (svgStory) return true;
+                const ring = document.querySelector('circle[stroke*="url"], svg[class*="story"], div[class*="avatar-story"]');
+                if (ring) return true;
                 const avatar = document.querySelector('[data-e2e="user-avatar"], [class*="AvatarContainer"]');
                 if (avatar) {
                     const style = window.getComputedStyle(avatar);
@@ -184,15 +165,32 @@ def get_tiktok_data(username):
                 return false;
             }''')
 
-            # Hikaye sayısını belirle
-            if not has_story_ring:
-                story_count = 0
-            else:
-                # Ağ paketinden gerçek adet geldiyse onu kullan, yoksa en az 1 hikaye vardır
-                if captured_story_count and captured_story_count[-1] > 0:
-                    story_count = captured_story_count[-1]
-                else:
+            if has_story_ring:
+                # Avatara tıklayıp açılan modalın üstündeki hikaye çubuklarını say
+                try:
+                    avatar_el = page.query_selector('[data-e2e="user-avatar"], [class*="AvatarContainer"]')
+                    if avatar_el:
+                        avatar_el.click(force=True)
+                        time.sleep(2)
+                        
+                        # Hikaye modalının üstündeki progress bar (çizgi) sayısını al
+                        actual_story_count = page.evaluate('''() => {
+                            // TikTok hikaye modalında her bir hikaye için üstte bir bar yer alır
+                            const progressBars = document.querySelectorAll('div[data-e2e="story-progress-bar"] > div, div[class*="ProgressBar"] > div, div[class*="story-progress"] > div');
+                            if (progressBars.length > 0) {
+                                return progressBars.length;
+                            }
+                            return 1;
+                        }''')
+                        story_count = actual_story_count
+                        page.keyboard.press("Escape")
+                        time.sleep(1)
+                    else:
+                        story_count = 1
+                except Exception:
                     story_count = 1
+            else:
+                story_count = 0
 
             page.evaluate("window.scrollBy(0, 300)")
             time.sleep(1)
