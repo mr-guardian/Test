@@ -7,13 +7,11 @@ import requests
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
-# Railway ortam değişkenlerinden oku; yoksa varsayılanı kullan
 TOKEN = os.getenv("TELEGRAM_TOKEN", "8902458393:AAFbMG-7nAuIFnBdWsBw5xilDiUCetSkSEg")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6009524525")
 SESSION_ID = os.getenv("TIKTOK_SESSION_ID", "f4eccac8039e5041af6c42a73a6cb4c4")
 ARALIK = int(os.getenv("CHECK_INTERVAL", "900"))  # 15 dakika
 
-# Linux/Railway uyumlu geçici veri dizini
 DATA_DIR = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "/tmp")
 STATE_FILE = os.path.join(DATA_DIR, "tiktok_bot_state.json")
 
@@ -69,7 +67,6 @@ def get_tiktok_data(username):
 
     try:
         with sync_playwright() as p:
-            # Bulut ve Docker ortamında WAF/Bot korumalarını aşmak için optimize edilmiş argümanlar
             browser = p.chromium.launch(
                 headless=True,
                 args=[
@@ -89,26 +86,20 @@ def get_tiktok_data(username):
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
                 locale="tr-TR",
                 timezone_id="Europe/Istanbul",
-                viewport={"width": 1440, "height": 900},
-                device_scale_factor=1,
-                has_touch=False,
-                is_mobile=False
+                viewport={"width": 1440, "height": 900}
             )
 
-            # Bot tespitini engelleyen komut dosyası (navigator.webdriver gizleme)
+            # Webdriver bayrağını temizle
             context.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined
-                });
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                window.chrome = { runtime: {} };
             """)
 
             context.add_cookies([{
                 "name": "sessionid",
                 "value": SESSION_ID,
                 "domain": ".tiktok.com",
-                "path": "/",
-                "secure": True,
-                "sameSite": "None"
+                "path": "/"
             }])
 
             page = context.new_page()
@@ -128,8 +119,10 @@ def get_tiktok_data(username):
             page.on("response", on_response)
 
             url = f"https://www.tiktok.com/@{username}"
-            page.goto(url, wait_until="networkidle", timeout=45000)
-            time.sleep(3)
+            
+            # networkidle yerine domcontentloaded kullanılmalı (TikTok sonsuz ağ paketi yollar)
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            time.sleep(3.5)
 
             # Pop-up / Çerez kapatma
             page.keyboard.press("Escape")
@@ -165,7 +158,7 @@ def get_tiktok_data(username):
             page.evaluate("window.scrollBy(0, 300)")
             time.sleep(1)
 
-            # 2. Repost Sekmesine Tıkla
+            # 2. Repost Sekmesine Tıklama
             tab_clicked = False
             tab_candidates = [
                 page.locator('[data-e2e="repost-tab"]'),
@@ -291,7 +284,6 @@ def run_full_check():
             current_summary.append(f"• {info['name']}: {new_val}")
             log(f"[+] {info['name']} -> Guncel: {new_val} (Onceki: {old_val})")
 
-            # Yalnızca değer değiştiğinde Telegram'a bildirim gönder
             if old_val is not None and new_val != old_val:
                 fark = new_val - old_val
                 target_url = f"https://www.tiktok.com/@{info.get('username')}" if "username" in info else info["url"]
