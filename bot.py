@@ -55,10 +55,7 @@ def log(msg):
 def notify(text, reply_markup=None):
     try:
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        payload = {
-            "chat_id": CHAT_ID,
-            "text": text[:4000]
-        }
+        payload = {"chat_id": CHAT_ID, "text": text[:4000]}
         if reply_markup:
             payload["reply_markup"] = reply_markup
         res = requests.post(url, json=payload, timeout=10)
@@ -79,13 +76,27 @@ def answer_callback(callback_query_id, text=None):
         pass
 
 
+def send_bytes_photo(img_bytes, caption=""):
+    try:
+        p_url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
+        res = requests.post(
+            p_url,
+            data={"chat_id": CHAT_ID, "caption": caption},
+            files={"photo": ("story.jpg", io.BytesIO(img_bytes), "image/jpeg")},
+            timeout=30
+        )
+        return res.status_code == 200
+    except Exception as e:
+        log(f"[!] Telegram fotoğraf gönderme hatası: {e}")
+        return False
+
+
 def send_media(media_url, is_video=False, caption=""):
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Referer": "https://www.tiktok.com/"
         }
-        # Medyayı belleğe indirip dosya olarak yüklemek TikTok'un link engellemesini aşar
         res = requests.get(media_url, headers=headers, timeout=25)
         if res.status_code == 200:
             file_data = io.BytesIO(res.content)
@@ -100,7 +111,6 @@ def send_media(media_url, is_video=False, caption=""):
                 if r.status_code == 200:
                     return True
 
-        # Bellekten yüklenemezse URL olarak dene
         endpoint = "sendVideo" if is_video else "sendPhoto"
         key = "video" if is_video else "photo"
         r = requests.post(f"https://api.telegram.org/bot{TOKEN}/{endpoint}", json={"chat_id": CHAT_ID, key: media_url, "caption": caption}, timeout=20)
@@ -114,6 +124,7 @@ def get_tiktok_data(username, extract_story_media=False):
     reposts_count = None
     has_story = 0
     story_media_url = None
+    story_screenshot_bytes = None
     is_video = False
 
     try:
@@ -154,7 +165,9 @@ def get_tiktok_data(username, extract_story_media=False):
 
             page = context.new_page()
             captured_reposts = []
+            captured_story_urls = []
 
+            # Ağ trafiğini dinle: Hem repostları hem de hikaye akışı CDN URL'lerini yakalar
             def on_response(response):
                 url = response.url.lower()
                 if "item_list" in url and "repost" in url:
@@ -165,6 +178,10 @@ def get_tiktok_data(username, extract_story_media=False):
                             captured_reposts.append(len(items))
                     except Exception:
                         pass
+                
+                # TikTok hikaye video CDN isteklerini yakala
+                if any(x in url for x in [".tiktokcdn.com", "byteoversea.com"]) and any(x in url for x in [".mp4", "video/tos", "playwm", "mime_type=video"]):
+                    captured_story_urls.append(response.url)
 
             page.on("response", on_response)
 
@@ -187,7 +204,7 @@ def get_tiktok_data(username, extract_story_media=False):
                 except Exception:
                     pass
 
-            # 1. Hikaye Tespiti
+            # 1. Hikaye Tespiti (Halka veya SVG)
             has_story = page.evaluate('''() => {
                 const svgStory = document.querySelector('circle[stroke*="url"], svg[class*="story"], div[class*="avatar-story"]');
                 if (svgStory) return 1;
@@ -201,41 +218,50 @@ def get_tiktok_data(username, extract_story_media=False):
                 return 0;
             }''')
 
-            # Hikaye medyası çekme (Profil fotoğrafını hariç tutan hassas seçici)
+            # Hikaye Detayını Çekme
             if has_story and extract_story_media:
                 try:
-                    avatar_el = page.query_selector('[data-e2e="user-avatar"], [class*="AvatarContainer"]')
-                    if avatar_el:
-                        avatar_el.click()
-                        time.sleep(3)
-                        
-                        media_info = page.evaluate('''() => {
-                            // 1. Hikaye modalı içindeki video kontrolü
-                            const vid = document.querySelector('div[class*="story"] video, div[data-e2e*="story"] video, video');
-                            if (vid) {
-                                const src = vid.currentSrc || vid.src || vid.querySelector('source')?.src;
-                                if (src && src.startsWith("http")) return { url: src, is_video: true };
-                            }
+                    # Hikaye dairesine (avatara) tıkla
+                    avatar_el = page.query_selector('circle[stroke*="url"], svg[class*="story"], [data-e2e="user-avatar"]')
+                    if not avatar_el:
+                        avatar_el = page.query_selector('[class*="AvatarContainer"]')
 
-                            // 2. Hikaye modalı içindeki hikaye resmi (profil fotoğrafını hariç tut)
-                            const storyImgs = Array.from(document.querySelectorAll('div[class*="story"] img, div[data-e2e*="story"] img, img[class*="story"]'));
-                            for (let img of storyImgs) {
-                                // Profil resmi konteynerindekileri yok say
-                                if (!img.closest('[data-e2e="user-avatar"]') && !img.closest('[class*="AvatarContainer"]') && img.src) {
+                    if avatar_el:
+                        avatar_el.click(force=True)
+                        time.sleep(3)
+
+                        # Oynatıcı modalının yüklenmesini bekle
+                        modal_area = page.query_selector('div[data-e2e="story-modal"], div[class*="StoryPlayer"], div[role="dialog"]')
+                        
+                        # Eğer ağdan bir video CDN linki yakalandıysa öncelikle onu al
+                        if captured_story_urls:
+                            story_media_url = captured_story_urls[-1]
+                            is_video = True
+                        else:
+                            # DOM üzerinde doğrudan hikaye elementinin görüntüsünü veya linkini al
+                            media_info = page.evaluate('''() => {
+                                const v = document.querySelector('div[role="dialog"] video, div[class*="story"] video, video');
+                                if (v && (v.currentSrc || v.src) && !v.src.startsWith("blob:")) {
+                                    return { url: v.currentSrc || v.src, is_video: true };
+                                }
+                                const img = document.querySelector('div[role="dialog"] img, div[class*="story"] img');
+                                if (img && img.src && !img.closest('[data-e2e="user-avatar"]')) {
                                     return { url: img.src, is_video: false };
                                 }
-                            }
-                            return null;
-                        }''')
+                                return null;
+                            }''')
 
-                        if media_info:
-                            story_media_url = media_info.get("url")
-                            is_video = media_info.get("is_video", False)
+                            if media_info:
+                                story_media_url = media_info["url"]
+                                is_video = media_info["is_video"]
+                            elif modal_area:
+                                # Blob korumalı video ise doğrudan oynatıcı modalının ekran görüntüsünü al
+                                story_screenshot_bytes = modal_area.screenshot()
 
                         page.keyboard.press("Escape")
                         time.sleep(1)
                 except Exception as story_err:
-                    log(f"[!] Hikaye medyasi alinirken hata: {story_err}")
+                    log(f"[!] Hikaye yakalama hatasi: {story_err}")
 
             page.evaluate("window.scrollBy(0, 300)")
             time.sleep(1)
@@ -297,20 +323,26 @@ def get_tiktok_data(username, extract_story_media=False):
 
     except Exception as e:
         log(f"[!] Playwright hatasi (@{username}): {e}")
-        return None, None, None, False
+        return None, None, None, None, False
 
-    return reposts_count, has_story, story_media_url, is_video
+    return reposts_count, has_story, story_media_url, story_screenshot_bytes, is_video
 
 
 def fetch_and_send_sillagunerrr_story():
-    notify("⏳ sillagunerrr hikayesi aliniyor, bekleyiniz...")
-    _, has_st, st_url, is_vid = get_tiktok_data("sillagunerrr", extract_story_media=True)
-    if has_st and st_url:
-        ok = send_media(st_url, is_video=is_vid, caption="📸 sillagunerrr Güncel Hikayesi")
-        if not ok:
-            notify(f"🔗 Hikaye Medya Linki:\n{st_url}")
-    else:
-        notify("❌ Aktif hikaye bulunamadi veya hikaye yuklenemedi.")
+    notify("⏳ sillagunerrr hikayesi alınıyor, bekleyiniz...")
+    _, has_st, st_url, st_bytes, is_vid = get_tiktok_data("sillagunerrr", extract_story_media=True)
+    
+    if has_st:
+        if st_url:
+            ok = send_media(st_url, is_video=is_vid, caption="📸 sillagunerrr Güncel Hikayesi")
+            if ok:
+                return
+        if st_bytes:
+            ok = send_bytes_photo(st_bytes, caption="📸 sillagunerrr Güncel Hikaye Önizlemesi")
+            if ok:
+                return
+    
+    notify("❌ Hikaye penceresi açılamadı veya medya çekilemedi.")
 
 
 def get_threads_count(url):
@@ -356,11 +388,12 @@ def run_full_check(is_manual=False):
                 uname = info["username"]
                 if uname not in tiktok_cache:
                     log(f"[*] TikTok taraniyor: @{uname}...")
-                    rep_cnt, st_cnt, st_media, is_vid = get_tiktok_data(uname, extract_story_media=(uname == "sillagunerrr"))
+                    rep_cnt, st_cnt, st_media, st_bytes, is_vid = get_tiktok_data(uname, extract_story_media=(uname == "sillagunerrr"))
                     tiktok_cache[uname] = {
                         "reposts": rep_cnt,
                         "story": st_cnt,
                         "story_media": st_media,
+                        "story_bytes": st_bytes,
                         "is_video": is_vid
                     }
 
@@ -401,12 +434,13 @@ def run_full_check(is_manual=False):
 
                 notify(msg, reply_markup=reply_markup)
 
-                # Yeni hikaye açıldıysa doğrudan medyayı yolla
+                # Yeni hikaye açıldıysa doğrudan medyayı gönder
                 if k == "sillagunerrr_story" and new_val > old_val:
-                    st_media = tiktok_cache.get("sillagunerrr", {}).get("story_media")
-                    is_vid = tiktok_cache.get("sillagunerrr", {}).get("is_video", False)
-                    if st_media:
-                        send_media(st_media, is_video=is_vid, caption="📸 sillagunerrr Yeni Hikaye")
+                    c_data = tiktok_cache.get("sillagunerrr", {})
+                    if c_data.get("story_media"):
+                        send_media(c_data["story_media"], is_video=c_data.get("is_video", False), caption="📸 sillagunerrr Yeni Hikaye")
+                    elif c_data.get("story_bytes"):
+                        send_bytes_photo(c_data["story_bytes"], caption="📸 sillagunerrr Yeni Hikaye")
 
             state[k] = new_val
 
@@ -445,7 +479,7 @@ def bot_listener():
             for item in resp.get("result", []):
                 last_update_id = item["update_id"]
 
-                # Buton Tıklamaları (Callback)
+                # Buton Tıklamaları
                 if "callback_query" in item:
                     cb = item["callback_query"]
                     cb_id = cb["id"]
