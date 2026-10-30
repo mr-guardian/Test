@@ -21,6 +21,11 @@ TARGETS = {
         "name": "sillagunerrr Hikayeler",
         "username": "sillagunerrr"
     },
+    "sillagunerrr_following": {
+        "platform": "tiktok_following",
+        "name": "sillagunerrr Takip Sayısı",
+        "username": "sillagunerrr"
+    },
     "sillagunerrr_reposts": {
         "platform": "tiktok_reposts",
         "name": "sillagunerrr Repostlar",
@@ -78,6 +83,7 @@ def answer_callback(callback_query_id, text=None):
 def get_tiktok_data(username):
     reposts_count = None
     story_count = 0
+    following_count = None
 
     try:
         with sync_playwright() as p:
@@ -118,7 +124,6 @@ def get_tiktok_data(username):
             page = context.new_page()
             captured_reposts = []
 
-            # SADECE ve SADECE repost paketlerini dinle (hikaye API dinlemesi kaldırıldı)
             def on_response(response):
                 url = response.url.lower()
                 if "item_list" in url and "repost" in url:
@@ -151,7 +156,26 @@ def get_tiktok_data(username):
                 except Exception:
                     pass
 
-            # 1. Hikaye Kontrolü (Halka Tespiti + Progress Bar Sayımı)
+            # 1. Takip Edilenler Sayısı (Following Count)
+            following_count = page.evaluate('''() => {
+                const el = document.querySelector('[data-e2e="following-count"]');
+                if (el) {
+                    const cleanTxt = el.innerText.trim().replace(/,/g, '').replace(/\\./g, '');
+                    const parsed = parseInt(cleanTxt, 10);
+                    if (!isNaN(parsed)) return parsed;
+                }
+                // Fallback: Başlıktaki linkler içinden arama
+                const links = Array.from(document.querySelectorAll('a[href*="following"], strong'));
+                for (let l of links) {
+                    const txt = l.innerText.trim();
+                    if (/^\\d+$/.test(txt)) {
+                        return parseInt(txt, 10);
+                    }
+                }
+                return null;
+            }''')
+
+            # 2. Hikaye Halka Kontrolü
             has_story_ring = page.evaluate('''() => {
                 const ring = document.querySelector('circle[stroke*="url"], svg[class*="story"], div[class*="avatar-story"]');
                 if (ring) return true;
@@ -166,23 +190,41 @@ def get_tiktok_data(username):
             }''')
 
             if has_story_ring:
-                # Avatara tıklayıp açılan modalın üstündeki hikaye çubuklarını say
                 try:
                     avatar_el = page.query_selector('[data-e2e="user-avatar"], [class*="AvatarContainer"]')
                     if avatar_el:
                         avatar_el.click(force=True)
                         time.sleep(2)
-                        
-                        # Hikaye modalının üstündeki progress bar (çizgi) sayısını al
+
                         actual_story_count = page.evaluate('''() => {
-                            // TikTok hikaye modalında her bir hikaye için üstte bir bar yer alır
-                            const progressBars = document.querySelectorAll('div[data-e2e="story-progress-bar"] > div, div[class*="ProgressBar"] > div, div[class*="story-progress"] > div');
-                            if (progressBars.length > 0) {
-                                return progressBars.length;
+                            const allText = document.body.innerText;
+                            const matchRatio = allText.match(/\\b(\\d+)\\s*\\/\\s*(\\d+)\\b/);
+                            if (matchRatio && parseInt(matchRatio[2]) <= 30) {
+                                return parseInt(matchRatio[2]);
+                            }
+
+                            const modal = document.querySelector('div[role="dialog"], div[data-e2e="story-modal"], div[class*="Story"]');
+                            if (modal) {
+                                const bars = Array.from(modal.querySelectorAll('div')).filter(el => {
+                                    const rect = el.getBoundingClientRect();
+                                    return rect.top >= 0 && rect.top <= 80 && rect.height >= 1 && rect.height <= 8 && rect.width > 10;
+                                });
+
+                                if (bars.length > 0) {
+                                    const parents = bars.map(b => b.parentElement);
+                                    const counts = {};
+                                    parents.forEach(p => {
+                                        counts[p] = (counts[p] || 0) + 1;
+                                    });
+                                    const maxCount = Math.max(...Object.values(counts));
+                                    if (maxCount >= 1 && maxCount <= 50) {
+                                        return maxCount;
+                                    }
+                                }
                             }
                             return 1;
                         }''')
-                        story_count = actual_story_count
+                        story_count = actual_story_count if actual_story_count > 0 else 1
                         page.keyboard.press("Escape")
                         time.sleep(1)
                     else:
@@ -195,7 +237,7 @@ def get_tiktok_data(username):
             page.evaluate("window.scrollBy(0, 300)")
             time.sleep(1)
 
-            # 2. Repost Sekmesine Tıkla
+            # 3. Repost Sekmesine Tıkla
             tab_clicked = page.evaluate('''() => {
                 const tabs = Array.from(document.querySelectorAll('[role="tab"], div[data-e2e*="tab"], p, span'));
                 let target = tabs.find(el => {
@@ -231,7 +273,7 @@ def get_tiktok_data(username):
                 page.evaluate("window.scrollBy(0, 200)")
                 time.sleep(1)
 
-            # 3. Repost Sayımı
+            # 4. Repost Sayımı
             if captured_reposts:
                 reposts_count = captured_reposts[-1]
             elif tab_clicked:
@@ -252,9 +294,9 @@ def get_tiktok_data(username):
 
     except Exception as e:
         log(f"[!] Playwright hatasi (@{username}): {e}")
-        return None, None
+        return None, None, None
 
-    return reposts_count, story_count
+    return reposts_count, story_count, following_count
 
 
 def get_threads_count(url):
@@ -300,10 +342,11 @@ def run_full_check(is_manual=False):
                 uname = info["username"]
                 if uname not in tiktok_cache:
                     log(f"[*] TikTok taraniyor: @{uname}...")
-                    rep_cnt, st_cnt = get_tiktok_data(uname)
+                    rep_cnt, st_cnt, foll_cnt = get_tiktok_data(uname)
                     tiktok_cache[uname] = {
                         "reposts": rep_cnt,
-                        "story": st_cnt
+                        "story": st_cnt,
+                        "following": foll_cnt
                     }
 
                 cached = tiktok_cache[uname]
@@ -311,6 +354,8 @@ def run_full_check(is_manual=False):
                     new_val = cached["reposts"]
                 elif p == "tiktok_story":
                     new_val = cached["story"]
+                elif p == "tiktok_following":
+                    new_val = cached["following"]
 
             elif p == "threads":
                 log(f"[*] Threads taraniyor: {info['url']}...")
@@ -324,16 +369,23 @@ def run_full_check(is_manual=False):
             current_summary.append(f"• {info['name']}: {new_val}")
             log(f"[+] {info['name']} -> Guncel: {new_val} (Onceki: {old_val})")
 
-            # Yalnızca değişiklik olduğunda Telegram bildirimi
+            # Bildirim Mantığı:
             if old_val is not None and new_val != old_val:
                 fark = new_val - old_val
-                target_url = f"https://www.tiktok.com/@{info.get('username')}" if "username" in info else info["url"]
-                msg = f"🔔 {info['name']}: {old_val} ➔ {new_val} ({fark:+d})\n🔗 {target_url}"
                 
-                if p == "threads" and post_txt:
-                    msg += f"\n\n📝 Son Threads Gönderisi:\n\"{post_txt[:400]}\""
+                # Takip sayısı için sadece artış olduğunda bildir
+                should_notify = True
+                if k == "sillagunerrr_following" and fark <= 0:
+                    should_notify = False
 
-                notify(msg)
+                if should_notify:
+                    target_url = f"https://www.tiktok.com/@{info.get('username')}" if "username" in info else info["url"]
+                    msg = f"🔔 {info['name']}: {old_val} ➔ {new_val} ({fark:+d})\n🔗 {target_url}"
+                    
+                    if p == "threads" and post_txt:
+                        msg += f"\n\n📝 Son Threads Gönderisi:\n\"{post_txt[:400]}\""
+
+                    notify(msg)
 
             state[k] = new_val
 
@@ -409,7 +461,7 @@ def bot_listener():
                         notify(
                             "🤖 Takip Botu Aktif!\n\n"
                             "• Değişiklik olmadıkça sessiz çalışır.\n"
-                            "• Hikaye veya repost sayısı değiştiğinde bildirim alırsınız.\n"
+                            "• Takipçi/Takip edilen sayısı arttığında anında bildirim gelir.\n"
                             "• Threads sayısı değiştiğinde son metin eklenir.",
                             reply_markup=main_buttons
                         )
