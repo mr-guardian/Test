@@ -61,9 +61,27 @@ def notify(text):
         log(f"[!] Telegram bildirim hatasi: {e}")
 
 
-def get_tiktok_data(username):
+def send_media(media_url, caption=""):
+    try:
+        # Önce video olarak göndermeyi dene
+        v_url = f"https://api.telegram.org/bot{TOKEN}/sendVideo"
+        res = requests.post(v_url, json={"chat_id": CHAT_ID, "video": media_url, "caption": caption}, timeout=20)
+        if res.status_code == 200:
+            return
+
+        # Video değilse görsel olarak gönder
+        p_url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
+        res = requests.post(p_url, json={"chat_id": CHAT_ID, "photo": media_url, "caption": caption}, timeout=20)
+        if res.status_code != 200:
+            log(f"[!] Medya gonderilemedi: {res.text}")
+    except Exception as e:
+        log(f"[!] Telegram medya hatasi: {e}")
+
+
+def get_tiktok_data(username, extract_story_media=False):
     reposts_count = None
     has_story = 0
+    story_media_url = None
 
     try:
         with sync_playwright() as p:
@@ -89,7 +107,6 @@ def get_tiktok_data(username):
                 viewport={"width": 1440, "height": 900}
             )
 
-            # Bot izlerini temizle
             context.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
                 window.chrome = { runtime: {} };
@@ -105,10 +122,8 @@ def get_tiktok_data(username):
             page = context.new_page()
             captured_reposts = []
 
-            # Ağ trafiğinden dönen repost JSON verilerini yakala
             def on_response(response):
                 url = response.url.lower()
-                # TikTok'un repost API istek rotası
                 if "item_list" in url and "repost" in url:
                     try:
                         res_json = response.json()
@@ -120,12 +135,10 @@ def get_tiktok_data(username):
 
             page.on("response", on_response)
 
-            # Dili kesin olarak Türkçe sabitle
             url = f"https://www.tiktok.com/@{username}?lang=tr-TR"
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
             time.sleep(3)
 
-            # Pop-up / Çerez kapatma
             page.keyboard.press("Escape")
             for sel in [
                 '[data-e2e="modal-close-inner-button"]',
@@ -141,7 +154,7 @@ def get_tiktok_data(username):
                 except Exception:
                     pass
 
-            # 1. Hikaye Kontrolü
+            # 1. Hikaye Tespiti
             has_story = page.evaluate('''() => {
                 const svgStory = document.querySelector('circle[stroke*="url"], svg[class*="story"], div[class*="avatar-story"]');
                 if (svgStory) return 1;
@@ -155,15 +168,31 @@ def get_tiktok_data(username):
                 return 0;
             }''')
 
-            # Sayfayı kaydır
+            # Hikaye varsa ve medya çekilmesi isteniyorsa doğrudan tıkla ve medya URL'ini al
+            if has_story and extract_story_media:
+                try:
+                    avatar_el = page.query_selector('[data-e2e="user-avatar"], [class*="AvatarContainer"]')
+                    if avatar_el:
+                        avatar_el.click()
+                        time.sleep(2.5)
+                        story_media_url = page.evaluate('''() => {
+                            const vid = document.querySelector('video source, video');
+                            if (vid && vid.src) return vid.src;
+                            const img = document.querySelector('img[class*="Story"], img[class*="story"]');
+                            if (img && img.src) return img.src;
+                            return null;
+                        }''')
+                        page.keyboard.press("Escape")
+                        time.sleep(1)
+                except Exception as story_err:
+                    log(f"[!] Hikaye medyasi alinirken hata: {story_err}")
+
             page.evaluate("window.scrollBy(0, 300)")
             time.sleep(1)
 
-            # 2. Doğrudan Repost Sekmesini Bul ve Tıkla (İkon ve Özel Nitelik Eşleşmesi)
+            # 2. Repost Sekmesine Tıkla
             tab_clicked = page.evaluate('''() => {
                 const tabs = Array.from(document.querySelectorAll('[role="tab"], div[data-e2e*="tab"], p, span'));
-                
-                // Öncelik 1: Repost / Yeniden metni veya niteliği
                 let target = tabs.find(el => {
                     const txt = (el.innerText || "").trim().toLowerCase();
                     const e2e = (el.getAttribute("data-e2e") || "").toLowerCase();
@@ -177,7 +206,6 @@ def get_tiktok_data(username):
                     );
                 });
 
-                // Öncelik 2: SVG repost ikonu barındıran sekme
                 if (!target) {
                     target = tabs.find(el => {
                         const html = el.innerHTML.toLowerCase();
@@ -198,22 +226,16 @@ def get_tiktok_data(username):
                 page.evaluate("window.scrollBy(0, 200)")
                 time.sleep(1)
 
-            # 3. Sonuç Sayımı
-            # Ağ yanıtından yakalanan repost en kesin veridir
+            # 3. Repost Sayımı
             if captured_reposts:
                 reposts_count = captured_reposts[-1]
             elif tab_clicked:
-                # Sadece seçili (aktif) sekmenin altındaki listeyi al
                 dom_count = page.evaluate('''() => {
-                    // Yalnızca repost listesi konteyneri
                     const container = document.querySelector('div[data-e2e="user-repost-list"], div[data-e2e="user-post-item-list"]');
                     if (!container) return 0;
-
-                    // Eğer ana profil videosuysa ve repost sekmesi tıklandıysa boş olabilir
                     const items = container.querySelectorAll('[data-e2e="user-post-item"], a[href*="/video/"]');
                     const links = Array.from(items).map(i => i.href || i.querySelector('a')?.href).filter(Boolean);
-                    const uniqueHrefs = new Set(links.map(l => l.split('?')[0]));
-                    return uniqueHrefs.size;
+                    return new Set(links.map(l => l.split('?')[0])).size;
                 }''')
                 reposts_count = dom_count
             else:
@@ -225,9 +247,9 @@ def get_tiktok_data(username):
 
     except Exception as e:
         log(f"[!] Playwright hatasi (@{username}): {e}")
-        return None, None
+        return None, None, None
 
-    return reposts_count, has_story
+    return reposts_count, has_story, story_media_url
 
 
 def get_threads_count(url):
@@ -249,7 +271,7 @@ def get_threads_count(url):
     return None, None
 
 
-def run_full_check():
+def run_full_check(is_manual=False):
     global memory_state
     with lock:
         state = memory_state.copy()
@@ -273,10 +295,13 @@ def run_full_check():
                 uname = info["username"]
                 if uname not in tiktok_cache:
                     log(f"[*] TikTok taraniyor: @{uname}...")
-                    rep_cnt, st_cnt = get_tiktok_data(uname)
+                    # sillagunerrr hesabı taranırken hikaye medyasını da yakala
+                    need_media = (uname == "sillagunerrr")
+                    rep_cnt, st_cnt, st_media = get_tiktok_data(uname, extract_story_media=need_media)
                     tiktok_cache[uname] = {
                         "reposts": rep_cnt,
-                        "story": st_cnt
+                        "story": st_cnt,
+                        "story_media": st_media
                     }
 
                 cached = tiktok_cache[uname]
@@ -297,13 +322,21 @@ def run_full_check():
             current_summary.append(f"• {info['name']}: {new_val}")
             log(f"[+] {info['name']} -> Guncel: {new_val} (Onceki: {old_val})")
 
+            # YALNIZCA DEĞİŞİKLİK OLDUĞUNDA BİLDİRİM GÖNDER
             if old_val is not None and new_val != old_val:
                 fark = new_val - old_val
                 target_url = f"https://www.tiktok.com/@{info.get('username')}" if "username" in info else info["url"]
                 msg = f"🔔 {info['name']}: {old_val} ➔ {new_val} ({fark:+d})\n🔗 {target_url}"
+                
                 if fark > 0 and post_txt:
                     msg += f"\n📝 Son Gonderi: \"{post_txt[:200]}\""
                 notify(msg)
+
+                # sillagunerrr yeni bir hikaye paylaştıysa medyayı doğrudan gönder
+                if k == "sillagunerrr_story" and new_val > old_val:
+                    st_media = tiktok_cache.get("sillagunerrr", {}).get("story_media")
+                    if st_media:
+                        send_media(st_media, caption="📸 sillagunerrr Yeni Hikaye")
 
             state[k] = new_val
 
@@ -315,14 +348,17 @@ def run_full_check():
         except Exception as file_err:
             log(f"[!] Dosya yazma uyarisi: {file_err}")
 
-        return "\n".join(current_summary)
+        # Yalnızca manuel tetiklendiğinde raporu döndür
+        if is_manual:
+            return "\n".join(current_summary)
+        return None
 
 
 def tracker_thread():
     while True:
         time.sleep(ARALIK)
-        log("Zamanlanmis rutin kontrol calisiyor...")
-        run_full_check()
+        log("Zamanlanmis rutin kontrol calisiyor (Sessiz mod)...")
+        run_full_check(is_manual=False)
 
 
 def bot_listener():
@@ -346,7 +382,7 @@ def bot_listener():
                 if chat_id == str(CHAT_ID) and text:
                     if text in ["/kontrol", "kontrol"]:
                         notify("🔍 Sayfalar taraniyor, bekleyiniz...")
-                        summary = run_full_check()
+                        summary = run_full_check(is_manual=True)
                         notify(f"📊 Canli Durum Raporu:\n\n{summary}")
 
                     elif text in ["/durum", "durum"]:
@@ -360,8 +396,8 @@ def bot_listener():
 
 if __name__ == "__main__":
     log("Bulut Takip Botu Baslatiliyor...")
-    notify("🚀 Bulut Takip Botu baslatildi! Ilk tarama yapiliyor...")
-    report = run_full_check()
-    notify(f"📊 Ilk Tarama Raporu:\n\n{report}")
+    # İlk başlangıçta sadece takip durumunu doğrular, sohbeti raporla doldurmaz
+    notify("🚀 Bot aktif edildi! Degisiklik olmadikca rapor gonderilmeyecek, yalnizca yeni hareketlerde bildirim alacaksiniz.")
+    run_full_check(is_manual=False)
     threading.Thread(target=tracker_thread, daemon=True).start()
     bot_listener()
