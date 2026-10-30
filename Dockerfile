@@ -5,9 +5,12 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Eksik olan Chromium ikililerini ve sistem bağımlılıklarını kur
+RUN playwright install chromium
+RUN playwright install-deps chromium
+
 COPY . .
 
-# Logların tamponlanmadan terminale akmasını sağlar
 ENV PYTHONUNBUFFERED=1
 
 CMD ["python", "bot.py"]
