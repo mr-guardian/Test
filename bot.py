@@ -15,7 +15,7 @@ CONFIG_FILE = os.path.join(DATA_DIR, "bot_config.json")
 
 # Varsayılan Yapılandırma
 config = {
-    "interval": int(os.getenv("CHECK_INTERVAL", "900")),  # Saniye
+    "interval": int(os.getenv("CHECK_INTERVAL", "900")),
     "is_active": True,
     "silent_notify": False
 }
@@ -28,11 +28,11 @@ if os.path.exists(CONFIG_FILE):
         pass
 
 TARGETS = {
-    "sillagunerrr_story": {"platform": "viewwo_story", "name": "sillagunerrr Hikayeler", "username": "sillagunerrr"},
-    "sillagunerrr_following": {"platform": "viewwo_following", "name": "sillagunerrr Takip Sayısı", "username": "sillagunerrr"},
-    "sillagunerrr_reposts": {"platform": "viewwo_reposts", "name": "sillagunerrr Repostlar", "username": "sillagunerrr"},
-    "userr44559014_reposts": {"platform": "viewwo_reposts", "name": "userr44559014 Repostlar", "username": "userr44559014"},
-    "emin_htp_reposts": {"platform": "viewwo_reposts", "name": "emin_htp Repostlar", "username": "emin_htp"},
+    "sillagunerrr_story": {"platform": "viewoo_story", "name": "sillagunerrr Hikayeler", "username": "sillagunerrr"},
+    "sillagunerrr_following": {"platform": "viewoo_following", "name": "sillagunerrr Takip Sayısı", "username": "sillagunerrr"},
+    "sillagunerrr_reposts": {"platform": "viewoo_reposts", "name": "sillagunerrr Repostlar", "username": "sillagunerrr"},
+    "userr44559014_reposts": {"platform": "viewoo_reposts", "name": "userr44559014 Repostlar", "username": "userr44559014"},
+    "emin_htp_reposts": {"platform": "viewoo_reposts", "name": "emin_htp Repostlar", "username": "emin_htp"},
     "sillagunerr_threads": {"platform": "threads", "name": "sillagunerr Threads", "url": "https://threadlook.com/profile/sillagunerr"}
 }
 
@@ -93,7 +93,7 @@ def get_interval_keyboard():
     }
 
 
-def get_viewwo_data(username):
+def get_viewoo_data(username):
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(
@@ -101,7 +101,7 @@ def get_viewwo_data(username):
                 args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
             )
             page = browser.new_page()
-            page.goto(f"https://viewwo.com/profile/{username}", wait_until="domcontentloaded", timeout=30000)
+            page.goto(f"https://viewoo.co/profile/{username}", wait_until="domcontentloaded", timeout=30000)
             time.sleep(3)
 
             data = page.evaluate('''() => {
@@ -131,7 +131,7 @@ def get_viewwo_data(username):
             browser.close()
             return data["reposts"], data["story"], data["following"]
     except Exception as e:
-        print(f"[!] Viewwo hatası (@{username}): {e}", flush=True)
+        print(f"[!] Viewoo hatası (@{username}): {e}", flush=True)
         return None, None, None
 
 
@@ -164,7 +164,7 @@ def run_full_check(is_manual=False):
             pass
 
     summary = []
-    viewwo_cache = {}
+    viewoo_cache = {}
 
     for k, info in TARGETS.items():
         old_val = state.get(k)
@@ -172,12 +172,12 @@ def run_full_check(is_manual=False):
         post_txt = None
         p = info["platform"]
 
-        if p.startswith("viewwo"):
+        if p.startswith("viewoo"):
             uname = info["username"]
-            if uname not in viewwo_cache:
-                rep, st, fol = get_viewwo_data(uname)
-                viewwo_cache[uname] = {"reposts": rep, "story": st, "following": fol}
-            new_val = viewwo_cache[uname][p.replace("viewwo_", "")]
+            if uname not in viewoo_cache:
+                rep, st, fol = get_viewoo_data(uname)
+                viewoo_cache[uname] = {"reposts": rep, "story": st, "following": fol}
+            new_val = viewoo_cache[uname][p.replace("viewoo_", "")]
 
         elif p == "threads":
             new_val, post_txt = get_threads_count(info["url"])
@@ -191,7 +191,7 @@ def run_full_check(is_manual=False):
         if old_val is not None and new_val != old_val:
             fark = new_val - old_val
             if not (k == "sillagunerrr_following" and fark <= 0):
-                url = f"https://viewwo.com/profile/{info.get('username')}" if "username" in info else info["url"]
+                url = f"https://viewoo.co/profile/{info.get('username')}" if "username" in info else info["url"]
                 msg = f"🔔 {info['name']}: {old_val} ➔ {new_val} ({fark:+d})\n🔗 {url}"
                 if p == "threads" and post_txt:
                     msg += f"\n\n📝 Son Gönderi:\n\"{post_txt[:300]}\""
@@ -234,7 +234,6 @@ def bot_listener():
             for item in resp.get("result", []):
                 last_id = item["update_id"]
 
-                # Buton Etkileşimleri
                 if "callback_query" in item:
                     cb = item["callback_query"]
                     cb_data = cb.get("data")
@@ -273,7 +272,6 @@ def bot_listener():
                     elif cb_data == "menu_main":
                         notify("⚙️ Kontrol Paneli:", reply_markup=get_main_keyboard())
 
-                # Metin Mesajları
                 msg = item.get("message", {})
                 if str(msg.get("chat", {}).get("id")) == str(CHAT_ID):
                     text = msg.get("text", "").strip().lower()
@@ -293,7 +291,7 @@ def bot_listener():
 
 
 if __name__ == "__main__":
-    notify("🚀 Takip Botu başlatıldı.", reply_markup=get_main_keyboard())
+    notify("🚀 Takip Botu başlatıldı (Viewoo).", reply_markup=get_main_keyboard())
     run_full_check(is_manual=False)
     threading.Thread(target=tracker_thread, daemon=True).start()
     bot_listener()
