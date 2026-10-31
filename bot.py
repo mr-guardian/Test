@@ -2,6 +2,7 @@ import os
 import re
 import time
 import json
+import html
 import threading
 import requests
 from bs4 import BeautifulSoup
@@ -140,6 +141,7 @@ def fetch_viewoo_profile_stats(username):
     try:
         resp = requests.get(url, headers=HEADERS, timeout=10)
         if resp.status_code == 200:
+            resp.encoding = "utf-8"
             soup = BeautifulSoup(resp.text, "html.parser")
             text = soup.get_text()
 
@@ -160,7 +162,6 @@ def fetch_viewoo_profile_stats(username):
             elif soup.select(".has-story, circle[stroke*='url'], [data-story-id]"):
                 story_cnt = 1
 
-            # Sayfa içindeki video linklerinden ID'leri topla
             video_ids = set(re.findall(r'/video/(\d{15,22})', resp.text))
 
             return {
@@ -184,7 +185,6 @@ def fetch_viewoo_reposts(username):
         if resp.status_code == 200:
             data = resp.json()
 
-            # API içindeki tüm 18-19 haneli TikTok video ID'lerini topla
             matched_ids = re.findall(r'\b7\d{18}\b', json.dumps(data))
             if matched_ids:
                 video_ids = list(set(matched_ids))
@@ -209,7 +209,6 @@ def fetch_viewoo_reposts(username):
     except Exception:
         pass
 
-    # API vermezse doğrudan web profili HTML sayfasını dene
     stats = fetch_viewoo_profile_stats(username)
     if stats.get("reposts") is not None:
         return stats["reposts"], f"Web Profili ({stats['reposts']} Repost)", stats.get("video_ids", [])
@@ -255,6 +254,7 @@ def check_page_count(key, page_info, current_state_val=0):
                 LAST_AUDIT_REPORT[key] = "❌ Sunucu yanıt vermedi"
                 return (current_state_val if current_state_val is not None else default_val), {}, False
 
+            resp.encoding = "utf-8"
             text_lower = resp.text.lower()
             if any(p in text_lower for p in ("no active stories", "no stories", "0 stories", "hikaye yok")):
                 LAST_AUDIT_REPORT[key] = "✅ Araştırıldı (Hikaye Yok)"
@@ -272,6 +272,8 @@ def check_page_count(key, page_info, current_state_val=0):
                 LAST_AUDIT_REPORT[key] = "❌ Araştırılamadı"
                 return (current_state_val if current_state_val is not None else default_val), {}, False
 
+            # Türkçe karakter bozulmasını engelleyen kodlama ataması
+            resp.encoding = "utf-8"
             soup = BeautifulSoup(resp.text, "html.parser")
             text = soup.get_text()
 
@@ -283,7 +285,8 @@ def check_page_count(key, page_info, current_state_val=0):
             for sel in post_selectors:
                 elements = soup.select(sel)
                 for el in elements:
-                    cleaned = el.get_text().strip()
+                    raw_text = el.get_text().strip()
+                    cleaned = html.unescape(raw_text)
                     if cleaned and len(cleaned) > 5 and not any(k in cleaned.lower() for k in ["threads", "followers", "following", "takipçi"]):
                         latest_post_text = cleaned
                         break
@@ -328,7 +331,7 @@ def run_check():
         old_val = current_state.get(key, -1)
         count, extra_data, is_success = check_page_count(key, info, current_state_val=old_val)
 
-        # Hata Eşik Sistemi
+        # Hata Eşik Sistemi Kontrolü
         if not is_success:
             FAIL_COUNTS[key] = FAIL_COUNTS.get(key, 0) + 1
             if FAIL_COUNTS[key] >= ERROR_THRESHOLD and key not in ALERTED_TARGETS:
@@ -350,7 +353,7 @@ def run_check():
             saved_ids = set(repost_history.get(key, []))
 
             if saved_ids and current_ids:
-                # 1. Silinen Repost Tespiti (Önceki havuzda olup yenide olmayanlar)
+                # Silinen Repost Tespiti
                 deleted_ids = saved_ids - current_ids
                 if deleted_ids:
                     username = info.get("username", "")
@@ -363,14 +366,13 @@ def run_check():
                         )
                         send_telegram_message(del_msg)
 
-                # 2. Yeni Eklenen Repost Tespiti (Yeni listede olup eskide olmayanlar)
+                # Yeni Eklenen Repost Tespiti
                 new_ids = current_ids - saved_ids
                 if new_ids:
                     username = info.get("username", "")
                     for n_id in new_ids:
                         extra_data["new_video_url"] = f"https://www.tiktok.com/@{username}/video/{n_id}"
 
-            # Güncel ID listesini hafızaya kaydet
             if current_ids:
                 repost_history[key] = list(current_ids)
 
@@ -388,11 +390,9 @@ def run_check():
             target_url = info.get("view_url") or info.get("url", "https://viewoo.co")
             line = f"• {info['name']}: {old_val} ➔ {count} ({fark:+d})\n  🔗 Profil: {target_url}"
 
-            # Yeni eklenen videonun doğrudan linki varsa mesaja iliştir
             if "new_video_url" in extra_data:
                 line += f"\n  🎬 Eklenen Video: {extra_data['new_video_url']}"
 
-            # Threads son paylaşım metni
             latest_text = extra_data.get("latest_text")
             if fark > 0 and info.get("type") == "threads" and latest_text:
                 preview = (latest_text[:280] + '...') if len(latest_text) > 280 else latest_text
@@ -551,7 +551,11 @@ def listen_telegram():
                         cb_data = callback_query.get("data")
                         cb_chat_id = str(callback_query.get("message", {}).get("chat", {}).get("id", ""))
                         try:
-                            requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery", json={"callback_query_id": callback_query.get("id")}, timeout=4)
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery",
+                                json={"callback_query_id": callback_query.get("id")},
+                                timeout=4
+                            )
                         except Exception:
                             pass
                         if cb_data and cb_chat_id == str(TELEGRAM_CHAT_ID):
