@@ -9,10 +9,23 @@ from playwright.sync_api import sync_playwright
 
 TOKEN = os.getenv("TELEGRAM_TOKEN", "8902458393:AAFbMG-7nAuIFnBdWsBw5xilDiUCetSkSEg")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6009524525")
-ARALIK = int(os.getenv("CHECK_INTERVAL", "900"))  # 15 dk
-
 DATA_DIR = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "/tmp")
 STATE_FILE = os.path.join(DATA_DIR, "state.json")
+CONFIG_FILE = os.path.join(DATA_DIR, "bot_config.json")
+
+# Varsayılan Yapılandırma
+config = {
+    "interval": int(os.getenv("CHECK_INTERVAL", "900")),  # Saniye
+    "is_active": True,
+    "silent_notify": False
+}
+
+if os.path.exists(CONFIG_FILE):
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            config.update(json.load(f))
+    except Exception:
+        pass
 
 TARGETS = {
     "sillagunerrr_story": {"platform": "viewwo_story", "name": "sillagunerrr Hikayeler", "username": "sillagunerrr"},
@@ -26,15 +39,58 @@ TARGETS = {
 memory_state = {}
 
 
-def notify(text):
+def save_config():
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-            json={"chat_id": CHAT_ID, "text": text[:4000]},
-            timeout=10
-        )
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(config, f)
+    except Exception:
+        pass
+
+
+def notify(text, reply_markup=None):
+    try:
+        payload = {
+            "chat_id": CHAT_ID,
+            "text": text[:4000],
+            "disable_notification": config["silent_notify"]
+        }
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json=payload, timeout=10)
     except Exception as e:
         print(f"[!] Telegram bildirim hatası: {e}", flush=True)
+
+
+def answer_callback(callback_query_id, text=None):
+    try:
+        payload = {"callback_query_id": callback_query_id}
+        if text:
+            payload["text"] = text
+        requests.post(f"https://api.telegram.org/bot{TOKEN}/answerCallbackQuery", json=payload, timeout=5)
+    except Exception:
+        pass
+
+
+def get_main_keyboard():
+    durum_icon = "⏸️ Takibi Durdur" if config["is_active"] else "▶️ Takibi Başlat"
+    ses_icon = "🔔 Sesli Bildirim" if not config["silent_notify"] else "🔕 Sessiz Bildirim"
+    return {
+        "inline_keyboard": [
+            [{"text": "🔍 Canlı Kontrol", "callback_data": "cmd_check"}, {"text": "📊 Kayıtlı Durum", "callback_data": "cmd_status"}],
+            [{"text": durum_icon, "callback_data": "cmd_toggle_active"}, {"text": ses_icon, "callback_data": "cmd_toggle_sound"}],
+            [{"text": f"⏱️ Periyot ({config['interval']//60} dk)", "callback_data": "menu_interval"}]
+        ]
+    }
+
+
+def get_interval_keyboard():
+    return {
+        "inline_keyboard": [
+            [{"text": "5 dk", "callback_data": "set_int_300"}, {"text": "15 dk", "callback_data": "set_int_900"}],
+            [{"text": "30 dk", "callback_data": "set_int_1800"}, {"text": "60 dk", "callback_data": "set_int_3600"}],
+            [{"text": "⬅️ Ana Menü", "callback_data": "menu_main"}]
+        ]
+    }
 
 
 def get_viewwo_data(username):
@@ -50,13 +106,10 @@ def get_viewwo_data(username):
 
             data = page.evaluate('''() => {
                 const text = document.body.innerText;
-
-                // Takip Sayısı
                 let following = null;
                 const fMatch = text.match(/(\\d+)\\s*(Following|Takip)/i);
                 if (fMatch) following = parseInt(fMatch[1], 10);
 
-                // Hikaye Sayısı
                 let story = 0;
                 const sMatch = text.match(/stories?\\s*\\((\\d+)\\)/i) || text.match(/hikaye\\s*\\((\\d+)\\)/i);
                 if (sMatch) {
@@ -65,7 +118,6 @@ def get_viewwo_data(username):
                     story = 1;
                 }
 
-                // Repost Sayısı
                 let reposts = null;
                 const rMatch = text.match(/reposts?\\s*\\((\\d+)\\)/i) || text.match(/yeniden\\s*\\((\\d+)\\)/i);
                 if (rMatch) {
@@ -73,7 +125,6 @@ def get_viewwo_data(username):
                 } else {
                     reposts = document.querySelectorAll('.video-card, .post-item, a[href*="/video/"]').length;
                 }
-
                 return { reposts, story, following };
             }''')
 
@@ -101,6 +152,9 @@ def get_threads_count(url):
 
 def run_full_check(is_manual=False):
     global memory_state
+    if not config["is_active"] and not is_manual:
+        return None
+
     state = memory_state.copy()
     if os.path.exists(STATE_FILE):
         try:
@@ -123,7 +177,6 @@ def run_full_check(is_manual=False):
             if uname not in viewwo_cache:
                 rep, st, fol = get_viewwo_data(uname)
                 viewwo_cache[uname] = {"reposts": rep, "story": st, "following": fol}
-
             new_val = viewwo_cache[uname][p.replace("viewwo_", "")]
 
         elif p == "threads":
@@ -135,7 +188,6 @@ def run_full_check(is_manual=False):
 
         summary.append(f"• {info['name']}: {new_val}")
 
-        # Değişiklik kontrolü ve anlık bildirim
         if old_val is not None and new_val != old_val:
             fark = new_val - old_val
             if not (k == "sillagunerrr_following" and fark <= 0):
@@ -159,12 +211,18 @@ def run_full_check(is_manual=False):
 
 def tracker_thread():
     while True:
-        time.sleep(ARALIK)
-        run_full_check(is_manual=False)
+        time.sleep(config["interval"])
+        if config["is_active"]:
+            run_full_check(is_manual=False)
 
 
 def bot_listener():
     last_id = 0
+    try:
+        requests.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=True", timeout=5)
+    except Exception:
+        pass
+
     while True:
         try:
             resp = requests.get(
@@ -175,23 +233,67 @@ def bot_listener():
 
             for item in resp.get("result", []):
                 last_id = item["update_id"]
+
+                # Buton Etkileşimleri
+                if "callback_query" in item:
+                    cb = item["callback_query"]
+                    cb_data = cb.get("data")
+                    answer_callback(cb["id"])
+
+                    if cb_data == "cmd_check":
+                        notify("🔍 Sayfalar taranıyor...")
+                        report = run_full_check(is_manual=True)
+                        notify(f"📊 Canlı Durum:\n\n{report}", reply_markup=get_main_keyboard())
+
+                    elif cb_data == "cmd_status":
+                        status = "\n".join(f"• {v['name']}: {memory_state.get(k, 'Kayıt yok')}" for k, v in TARGETS.items())
+                        notify(f"📋 Kayıtlı Veriler:\n\n{status}", reply_markup=get_main_keyboard())
+
+                    elif cb_data == "cmd_toggle_active":
+                        config["is_active"] = not config["is_active"]
+                        save_config()
+                        durum_str = "başlatıldı ✅" if config["is_active"] else "durduruldu ⏸️"
+                        notify(f"Takip {durum_str}", reply_markup=get_main_keyboard())
+
+                    elif cb_data == "cmd_toggle_sound":
+                        config["silent_notify"] = not config["silent_notify"]
+                        save_config()
+                        ses_str = "Sessiz mod aktif 🔕" if config["silent_notify"] else "Sesli bildirim aktif 🔔"
+                        notify(ses_str, reply_markup=get_main_keyboard())
+
+                    elif cb_data == "menu_interval":
+                        notify("⏱️ Yeni tarama sıklığını seçin:", reply_markup=get_interval_keyboard())
+
+                    elif cb_data.startswith("set_int_"):
+                        sec = int(cb_data.replace("set_int_", ""))
+                        config["interval"] = sec
+                        save_config()
+                        notify(f"⏱️ Tarama periyodu {sec // 60} dakika olarak güncellendi.", reply_markup=get_main_keyboard())
+
+                    elif cb_data == "menu_main":
+                        notify("⚙️ Kontrol Paneli:", reply_markup=get_main_keyboard())
+
+                # Metin Mesajları
                 msg = item.get("message", {})
                 if str(msg.get("chat", {}).get("id")) == str(CHAT_ID):
                     text = msg.get("text", "").strip().lower()
-                    if text in ["/kontrol", "kontrol"]:
+                    if text in ["/start", "panel", "menu", "/menu"]:
+                        notify("⚙️ **Takip Kontrol Paneli**\nAşağıdaki menüden tüm ayarları yönetebilirsiniz:", reply_markup=get_main_keyboard())
+                    elif text in ["/kontrol", "kontrol"]:
                         notify("🔍 Sayfalar taranıyor...")
                         report = run_full_check(is_manual=True)
-                        notify(f"📊 Canlı Durum:\n\n{report}")
+                        notify(f"📊 Canlı Durum:\n\n{report}", reply_markup=get_main_keyboard())
                     elif text in ["/durum", "durum"]:
                         status = "\n".join(f"• {v['name']}: {memory_state.get(k, 'Kayıt yok')}" for k, v in TARGETS.items())
-                        notify(f"📋 Kayıtlı Veriler:\n\n{status}")
+                        notify(f"📋 Kayıtlı Veriler:\n\n{status}", reply_markup=get_main_keyboard())
+
         except Exception:
             time.sleep(2)
         time.sleep(0.5)
 
 
 if __name__ == "__main__":
-    notify("🚀 Takip Botu başlatıldı (Sessiz mod).")
+    notify("🚀 Takip Botu başlatıldı.", reply_markup=get_main_keyboard())
     run_full_check(is_manual=False)
     threading.Thread(target=tracker_thread, daemon=True).start()
     bot_listener()
